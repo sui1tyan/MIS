@@ -10,6 +10,7 @@ import hashlib
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
+from contextlib import contextmanager
 
 # ---- Ed25519 verification ----
 from cryptography.hazmat.primitives import serialization
@@ -28,12 +29,12 @@ else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 os.makedirs(APP_DIR, exist_ok=True)
-IMG_STORE = os.path.join(APP_DIR, "images"); os.makedirs(IMG_STORE, exist_ok=True)
-LOG_PATH = os.path.join(APP_DIR, "gts_app.log")
-DB_PATH = os.path.join(APP_DIR, "gts_records.db")
-SETTINGS_PATH  = os.path.join(APP_DIR, "settings.json")
-LICENSE_PATH   = os.path.join(APP_DIR, "license.json")
-PUBKEY_PATH    = os.path.join(APP_DIR, "public_key.pem")
+IMG_STORE     = os.path.join(APP_DIR, "images"); os.makedirs(IMG_STORE, exist_ok=True)
+LOG_PATH      = os.path.join(APP_DIR, "gts_app.log")
+DB_PATH       = os.path.join(APP_DIR, "gts_records.db")
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+LICENSE_PATH  = os.path.join(APP_DIR, "license.json")
+PUBKEY_PATH   = os.path.join(APP_DIR, "public_key.pem")
 
 # ---------------- logging ----------------
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
@@ -57,7 +58,23 @@ DEFAULT_AREAS = {
 
 # ---------------- database ----------------
 def get_db_conn():
+    """Return a new SQLite connection."""
     return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+@contextmanager
+def db_cursor():
+    """Context manager to handle DB cursor safely."""
+    conn = get_db_conn()
+    cur = conn.cursor()
+    try:
+        yield cur
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        log_exc("DB error")
+        raise
+    finally:
+        conn.close()
 
 def _table_has_column(cur, table, col):
     cur.execute(f"PRAGMA table_info({table})")
@@ -65,74 +82,67 @@ def _table_has_column(cur, table, col):
 
 def ensure_db_schema():
     try:
-        conn = get_db_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS areas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS places (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                area_id INTEGER NOT NULL,
-                code TEXT,
-                name TEXT,
-                UNIQUE(area_id, code),
-                FOREIGN KEY(area_id) REFERENCES areas(id) ON DELETE CASCADE
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS gts_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT,
-                trip_no TEXT,
-                area_id INTEGER,
-                place_id INTEGER,
-                estate_pics TEXT,
-                kilang_pics TEXT,
-                estate_marks TEXT,
-                kilang_marks TEXT,
-                remarks TEXT,
-                status TEXT,
-                created_at TEXT,
-                updated_at TEXT,
-                apdn_no TEXT,
-                e12_seal TEXT,
-                k3_seal TEXT,
-                car_plate TEXT,
-                FOREIGN KEY(area_id) REFERENCES areas(id),
-                FOREIGN KEY(place_id) REFERENCES places(id)
-            )
-        """)
-        if not _table_has_column(cur, "gts_records", "car_plate"):
-            cur.execute("ALTER TABLE gts_records ADD COLUMN car_plate TEXT")
+        with db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS areas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS places (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    area_id INTEGER NOT NULL,
+                    code TEXT,
+                    name TEXT,
+                    UNIQUE(area_id, code),
+                    FOREIGN KEY(area_id) REFERENCES areas(id) ON DELETE CASCADE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gts_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT,
+                    trip_no TEXT,
+                    area_id INTEGER,
+                    place_id INTEGER,
+                    estate_pics TEXT,
+                    kilang_pics TEXT,
+                    estate_marks TEXT,
+                    kilang_marks TEXT,
+                    remarks TEXT,
+                    status TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    apdn_no TEXT,
+                    e12_seal TEXT,
+                    k3_seal TEXT,
+                    car_plate TEXT,
+                    FOREIGN KEY(area_id) REFERENCES areas(id),
+                    FOREIGN KEY(place_id) REFERENCES places(id)
+                )
+            """)
+            if not _table_has_column(cur, "gts_records", "car_plate"):
+                cur.execute("ALTER TABLE gts_records ADD COLUMN car_plate TEXT")
 
-        conn.commit()
-
-        # seed defaults
-        for area_name, places in DEFAULT_AREAS.items():
-            cur.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
-            row = cur.fetchone()
-            aid = row[0] if row else None
-            if not aid:
-                cur.execute("INSERT INTO areas (name) VALUES (?)", (area_name,))
-                aid = cur.lastrowid
-            for pcode in places:
-                cur.execute("SELECT 1 FROM places WHERE area_id=? AND code=?", (aid, pcode))
-                if not cur.fetchone():
-                    cur.execute("INSERT INTO places (area_id, code, name) VALUES (?,?,?)",
-                                (aid, pcode, pcode))
-        conn.commit()
-        conn.close()
+            # seed defaults
+            for area_name, places in DEFAULT_AREAS.items():
+                cur.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
+                row = cur.fetchone()
+                aid = row[0] if row else None
+                if not aid:
+                    cur.execute("INSERT INTO areas (name) VALUES (?)", (area_name,))
+                    aid = cur.lastrowid
+                for pcode in places:
+                    cur.execute("SELECT 1 FROM places WHERE area_id=? AND code=?", (aid, pcode))
+                    if not cur.fetchone():
+                        cur.execute("INSERT INTO places (area_id, code, name) VALUES (?,?,?)",
+                                    (aid, pcode, pcode))
     except Exception:
         log_exc("ensure_db_schema failed")
         raise
 
 ensure_db_schema()
-DB_CONN = get_db_conn()
-DB_CURSOR = DB_CONN.cursor()
 
 # ---------------- settings & license ----------------
 def _load_settings():
@@ -162,21 +172,20 @@ def _canonical_json_bytes(obj):
 def _verify_license_signature(lic_payload: dict, signature_b64: str) -> bool:
     try:
         if not os.path.exists(PUBKEY_PATH):
+            messagebox.showerror("License error", f"Public key file missing: {PUBKEY_PATH}")
             return False
         with open(PUBKEY_PATH, "rb") as f:
-            pub = Ed25519PublicKey.from_public_bytes(
-                serialization.load_pem_public_key(f.read()).public_bytes(
-                    encoding=serialization.Encoding.Raw,
-                    format=serialization.PublicFormat.Raw
-                )
-            )
+            data = f.read()
+        pub = serialization.load_pem_public_key(data)
         import base64
         sig = base64.b64decode(signature_b64)
         pub.verify(sig, _canonical_json_bytes(lic_payload))
         return True
     except Exception:
+        log_exc("_verify_license_signature")
+        messagebox.showerror("License error", "Public key invalid or signature verification failed.")
         return False
-
+        
 def _hash_pin(pin, salt_hex):
     h = hashlib.sha256()
     h.update(bytes.fromhex(salt_hex))
@@ -256,17 +265,24 @@ class DoubleScrollableFrame(ctk.CTkFrame):
         hsb.grid(row=1, column=0, sticky="ew")
 
         self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=max(e.width, self.inner.winfo_reqwidth())))
+        self.inner.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas.bind(
+            "<Configure>",
+            lambda e: self.canvas.itemconfigure(self._win, width=max(e.width, self.inner.winfo_reqwidth()))
+        )
 
+        # mouse wheel scrolling
         self.canvas.bind_all("<MouseWheel>", self._on_wheel)
         self.canvas.bind_all("<Shift-MouseWheel>", self._on_shift_wheel)
 
     def _on_wheel(self, e):
-        self.canvas.yview_scroll(-1 if e.delta>0 else 1, "units")
+        self.canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
 
     def _on_shift_wheel(self, e):
-        self.canvas.xview_scroll(-1 if e.delta>0 else 1, "units")
+        self.canvas.xview_scroll(-1 if e.delta > 0 else 1, "units")
 
 # ---------------- Main App ----------------
 class GTSApp(ctk.CTk):
@@ -324,7 +340,6 @@ class GTSApp(ctk.CTk):
         self.date_entry.grid(row=0, column=1, padx=6)
         self.date_entry.bind("<FocusIn>",  lambda e: self._ensure_date_default())
         self.date_entry.bind("<FocusOut>", lambda e: self._validate_or_default_date())
-        # ensure default is present but let StringVar drive content
         self.after(0, self._ensure_date_default)
 
         # Trip
@@ -370,8 +385,7 @@ class GTSApp(ctk.CTk):
             font=self.f_base
         )
         self.cr_place_box.grid(row=1, column=3, padx=6)
-        self._on_area_changed()  # populate places for initial area
-
+        self._on_area_changed()
         # Seals
         ctk.CTkLabel(top, text="Seal E12:", font=self.f_base).grid(row=2, column=0, padx=6, pady=6, sticky="w")
         self.cr_seal_e12 = tk.StringVar()
@@ -489,7 +503,7 @@ class GTSApp(ctk.CTk):
         self.cr_seal_k3.set("")
         self.cr_remarks.delete("0.0", "end")
         self.cr_area_box.configure(values=self._load_area_names())
-        self.cr_place_box.configure(values=self._load_places_for_current_area())
+        self._on_area_changed()
         for d in (self.estate_files, self.kilang_files):
             for k in d:
                 d[k]["paths"] = []
@@ -502,23 +516,29 @@ class GTSApp(ctk.CTk):
     # ---------- Area & Place management ----------
     def _load_area_names(self):
         try:
-            DB_CURSOR.execute("SELECT name FROM areas ORDER BY name")
-            return [r[0] for r in DB_CURSOR.fetchall()]
+            with db_cursor() as cur:
+                cur.execute("SELECT name FROM areas ORDER BY name")
+                return [r[0] for r in cur.fetchall()]
         except Exception:
-            log_exc("_load_area_names"); return []
+            log_exc("_load_area_names")
+            return []
 
     def _load_places_for_current_area(self):
         try:
             area = getattr(self, "cr_area_var", tk.StringVar()).get()
-            if not area: return []
-            DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
-            r = DB_CURSOR.fetchone()
-            if not r: return []
-            aid = r[0]
-            DB_CURSOR.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
-            return [x[0] for x in DB_CURSOR.fetchall()]
+            if not area:
+                return []
+            with db_cursor() as cur:
+                cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
+                r = cur.fetchone()
+                if not r:
+                    return []
+                aid = r[0]
+                cur.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
+                return [x[0] for x in cur.fetchall()]
         except Exception:
-            log_exc("_load_places_for_current_area"); return []
+            log_exc("_load_places_for_current_area")
+            return []
 
     def _reload_places_box(self):
         vals = self._load_places_for_current_area()
@@ -530,145 +550,207 @@ class GTSApp(ctk.CTk):
 
     def _add_area_dialog(self):
         name = simpledialog.askstring("Add Area", "Enter new area name:", parent=self)
-        if not name: return
+        if not name:
+            return
         try:
-            DB_CURSOR.execute("INSERT OR IGNORE INTO areas (name) VALUES (?)", (name.strip(),))
-            DB_CONN.commit()
+            with db_cursor() as cur:
+                cur.execute("INSERT OR IGNORE INTO areas (name) VALUES (?)", (name.strip(),))
             self.cr_area_box.configure(values=self._load_area_names())
             self.cr_area_var.set(name.strip())
             self.cr_area_box.set(name.strip())
             self._reload_places_box()
+
+            # refresh Manage dialog if open
+            if hasattr(self, "manage_area_list"):
+                self._reload_manage_areas()
         except Exception:
-            log_exc("_add_area_dialog"); messagebox.showerror("Error", "Failed to add area. See log.")
+            log_exc("_add_area_dialog")
+            messagebox.showerror("Error", "Failed to add area. See log.")
 
     def _add_place_dialog(self):
         area = self.cr_area_var.get()
         if not area:
-            messagebox.showwarning("No area", "Select or create an area first."); return
+            messagebox.showwarning("No area", "Select or create an area first.")
+            return
         code = simpledialog.askstring("Add Place", "Enter place code (e.g. 'SB4'):", parent=self)
-        if not code: return
+        if not code:
+            return
         try:
-            DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
-            r = DB_CURSOR.fetchone()
-            if not r:
-                messagebox.showerror("Error", "Area not found."); return
-            aid = r[0]
-            DB_CURSOR.execute("INSERT OR IGNORE INTO places (area_id, code, name) VALUES (?,?,?)",
-                              (aid, code.strip(), code.strip()))
-            DB_CONN.commit()
+            with db_cursor() as cur:
+                cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
+                r = cur.fetchone()
+                if not r:
+                    messagebox.showerror("Error", "Area not found.")
+                    return
+                aid = r[0]
+                cur.execute(
+                    "INSERT OR IGNORE INTO places (area_id, code, name) VALUES (?,?,?)",
+                    (aid, code.strip(), code.strip())
+                )
             self._reload_places_box()
             self.cr_place_var.set(code.strip())
             self.cr_place_box.set(code.strip())
+
+            # refresh Manage dialog if open
+            if hasattr(self, "manage_place_list"):
+                self._reload_manage_places()
         except Exception:
-            log_exc("_add_place_dialog"); messagebox.showerror("Error", "Failed to add place. See log.")
+            log_exc("_add_place_dialog")
+            messagebox.showerror("Error", "Failed to add place. See log.")
 
     def _guarded_manage_places_dialog(self):
+        """Open a management window to view/add/delete Areas and Places."""
         try:
-            cfg = _load_license()
-            payload = cfg.get("payload", {})
-            sig = cfg.get("signature", "")
-            if not payload or not sig or not _verify_license_signature(payload, sig) or "admin_pin_hash" not in payload or "admin_pin_salt" not in payload:
-                messagebox.showinfo("Restricted", "This copy has no valid license. Areas/Places are read-only.")
+            # prevent multiple dialogs
+            if hasattr(self, "manage_win") and self.manage_win.winfo_exists():
+                self.manage_win.lift()
                 return
-            if payload.get("bind_hostname"):
-                import socket
-                if payload.get("hostname") != socket.gethostname():
-                    messagebox.showerror("License rejected", f"This license is bound to {payload.get('hostname')}."); return
-            if payload.get("expires_at"):
-                try:
-                    expires = datetime.datetime.fromisoformat(payload["expires_at"].replace("Z",""))
-                    if datetime.datetime.utcnow() > expires:
-                        messagebox.showerror("License expired", f"License expired on {payload['expires_at']}."); return
-                except Exception:
-                    pass
-            pin = simpledialog.askstring("Admin PIN", "Enter Admin PIN to proceed:", parent=self, show="*")
-            if pin is None: return
-            expected = payload.get("admin_pin_hash"); salt = payload.get("admin_pin_salt")
-            if _hash_pin(pin, salt) != expected:
-                messagebox.showerror("Denied", "Incorrect PIN."); return
-            self._manage_places_dialog()
+
+            self.manage_win = ctk.CTkToplevel(self)
+            win = self.manage_win
+            win.title("Manage Areas and Places")
+            win.geometry("600x400")
+
+            # ---- Left: Areas ----
+            left_frame = ctk.CTkFrame(win)
+            left_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+            ctk.CTkLabel(left_frame, text="Areas", font=self.f_bold).pack(anchor="w")
+
+            self.manage_area_list = tk.Listbox(left_frame, height=15)
+            self.manage_area_list.pack(fill="both", expand=True, padx=5, pady=5)
+            self.manage_area_list.bind("<<ListboxSelect>>", lambda e: self._reload_manage_places())
+
+            btn_area_row = ctk.CTkFrame(left_frame)
+            btn_area_row.pack(fill="x", pady=5)
+            ctk.CTkButton(btn_area_row, text="Add Area", command=self._add_area_dialog, font=self.f_base).pack(side="left", padx=5)
+            ctk.CTkButton(btn_area_row, text="Delete Area", command=self._delete_selected_area,
+                          fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
+
+            # ---- Right: Places ----
+            right_frame = ctk.CTkFrame(win)
+            right_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+            ctk.CTkLabel(right_frame, text="Places in selected Area", font=self.f_bold).pack(anchor="w")
+
+            self.manage_place_list = tk.Listbox(right_frame, height=15)
+            self.manage_place_list.pack(fill="both", expand=True, padx=5, pady=5)
+
+            btn_place_row = ctk.CTkFrame(right_frame)
+            btn_place_row.pack(fill="x", pady=5)
+            ctk.CTkButton(btn_place_row, text="Add Place", command=self._add_place_dialog, font=self.f_base).pack(side="left", padx=5)
+            ctk.CTkButton(btn_place_row, text="Delete Place", command=self._delete_selected_place,
+                          fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
+
+            # preload lists
+            self._reload_manage_areas()
+            self._reload_manage_places()
+
         except Exception:
             log_exc("_guarded_manage_places_dialog")
+            messagebox.showerror("Error", "Failed to open Manage Areas/Places. See log.")
 
-    def _manage_places_dialog(self):
+    def _reload_manage_areas(self):
+        """Refresh the Areas list in Manage dialog."""
         try:
-            dlg = tk.Toplevel(self)
-            dlg.title("Manage Areas & Places")
-            dlg.geometry("680x460")
-            dlg.transient(self); dlg.grab_set()
-            lb_font = tkfont.Font(family="Roboto", size=11)
-
-            container = tk.Frame(dlg); container.pack(fill="both", expand=True, padx=8, pady=8)
-            left = tk.Frame(container); left.pack(side="left", fill="y", padx=(0, 8))
-            tk.Label(left, text="Areas", font=lb_font).pack()
-            area_list = tk.Listbox(left, width=30, height=18, exportselection=False, font=lb_font)
-            area_list.pack(fill="y")
-            for a in self._load_area_names():
-                area_list.insert("end", a)
-
-            mid = tk.Frame(container); mid.pack(side="left", fill="both", expand=True)
-            tk.Label(mid, text="Places in selected area", font=lb_font).pack()
-            place_list = tk.Listbox(mid, width=32, height=18, exportselection=False, font=lb_font)
-            place_list.pack(fill="both", expand=True)
-
-            def on_area_select(evt=None):
-                sel = area_list.curselection()
-                place_list.delete(0, "end")
-                if not sel: return
-                area = area_list.get(sel[0])
-                DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
-                r = DB_CURSOR.fetchone()
-                if not r: return
-                aid = r[0]
-                DB_CURSOR.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
-                for p in DB_CURSOR.fetchall():
-                    place_list.insert("end", p[0])
-
-            def delete_place():
-                sel = place_list.curselection()
-                if not sel:
-                    messagebox.showinfo("Select", "Select a place to delete.", parent=dlg); return
-                place_code = place_list.get(sel[0])
-                sel_area = area_list.curselection()
-                if not sel_area: return
-                area_name = area_list.get(sel_area[0])
-                DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
-                r = DB_CURSOR.fetchone(); aid = r[0]
-                if not messagebox.askyesno("Confirm", f"Delete place {place_code}?", parent=dlg): return
-                DB_CURSOR.execute("DELETE FROM places WHERE area_id = ? AND code = ?", (aid, place_code))
-                DB_CONN.commit(); on_area_select()
-
-            def delete_area():
-                sel = area_list.curselection()
-                if not sel:
-                    messagebox.showinfo("Select", "Select an area to delete.", parent=dlg); return
-                area_name = area_list.get(sel[0])
-                if not messagebox.askyesno("Confirm", f"Delete area '{area_name}' and all its places?", parent=dlg): return
-                DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
-                r = DB_CURSOR.fetchone()
-                if r:
-                    aid = r[0]
-                    DB_CURSOR.execute("DELETE FROM places WHERE area_id = ?", (aid,))
-                    DB_CURSOR.execute("DELETE FROM areas WHERE id = ?", (aid,))
-                    DB_CONN.commit()
-                area_list.delete(sel[0]); place_list.delete(0, "end")
-                self.cr_area_box.configure(values=self._load_area_names()); self._reload_places_box()
-
-            area_list.bind("<<ListboxSelect>>", on_area_select)
-
-            btnf = tk.Frame(dlg); btnf.pack(fill="x", side="bottom", padx=8, pady=8)
-            tk.Button(btnf, text="Delete Place", command=delete_place, font=lb_font).pack(side="left", padx=6)
-            tk.Button(btnf, text="Delete Area",  command=delete_area,  font=lb_font).pack(side="left", padx=6)
-            tk.Button(btnf, text="Close",        command=dlg.destroy,  font=lb_font).pack(side="right", padx=6)
-
+            self.manage_area_list.delete(0, "end")
+            with db_cursor() as cur:
+                cur.execute("SELECT name FROM areas ORDER BY name")
+                for (name,) in cur.fetchall():
+                    self.manage_area_list.insert("end", name)
         except Exception:
-            log_exc("manage_places_dialog")
+            log_exc("_reload_manage_areas")
+
+    def _reload_manage_places(self):
+        """Refresh the Places list based on selected Area in Manage dialog."""
+        try:
+            self.manage_place_list.delete(0, "end")
+            sel = self.manage_area_list.curselection()
+            if not sel:
+                return
+            area = self.manage_area_list.get(sel[0])
+            with db_cursor() as cur:
+                cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
+                r = cur.fetchone()
+                if not r:
+                    return
+                aid = r[0]
+                cur.execute("SELECT code FROM places WHERE area_id=? ORDER BY code", (aid,))
+                for (code,) in cur.fetchall():
+                    self.manage_place_list.insert("end", code)
+        except Exception:
+            log_exc("_reload_manage_places")
+
+    def _delete_selected_area(self):
+        try:
+            sel = self.manage_area_list.curselection()
+            if not sel:
+                messagebox.showinfo("Select", "Please select an Area to delete.")
+                return
+            name = self.manage_area_list.get(sel[0])
+
+            # check linked records
+            with db_cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM gts_records r JOIN areas a ON r.area_id=a.id WHERE a.name=?", (name,))
+                count = cur.fetchone()[0]
+            if count > 0:
+                messagebox.showwarning("Blocked", f"Cannot delete Area '{name}'. {count} records are linked.")
+                return
+
+            if not messagebox.askyesno("Confirm", f"Delete Area '{name}' and all its Places?"):
+                return
+            with db_cursor() as cur:
+                cur.execute("DELETE FROM areas WHERE name = ?", (name,))
+            self._reload_manage_areas()
+            self._reload_manage_places()
+            self.cr_area_box.configure(values=self._load_area_names())
+        except Exception:
+            log_exc("_delete_selected_area")
+            messagebox.showerror("Error", "Failed to delete Area. See log.")
+
+    def _delete_selected_place(self):
+        try:
+            sel_a = self.manage_area_list.curselection()
+            sel_p = self.manage_place_list.curselection()
+            if not sel_a or not sel_p:
+                messagebox.showinfo("Select", "Please select a Place to delete.")
+                return
+            area = self.manage_area_list.get(sel_a[0])
+            place = self.manage_place_list.get(sel_p[0])
+
+            # check linked records
+            with db_cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FROM gts_records r
+                    JOIN areas a ON r.area_id=a.id
+                    JOIN places p ON r.place_id=p.id
+                    WHERE a.name=? AND p.code=?
+                """, (area, place))
+                count = cur.fetchone()[0]
+            if count > 0:
+                messagebox.showwarning("Blocked", f"Cannot delete Place '{place}' in Area '{area}'. {count} records are linked.")
+                return
+
+            if not messagebox.askyesno("Confirm", f"Delete Place '{place}' in Area '{area}'?"):
+                return
+            with db_cursor() as cur:
+                cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
+                r = cur.fetchone()
+                if not r:
+                    return
+                aid = r[0]
+                cur.execute("DELETE FROM places WHERE area_id=? AND code=?", (aid, place))
+            self._reload_manage_places()
+            self.cr_place_box.configure(values=self._load_places_for_current_area())
+        except Exception:
+            log_exc("_delete_selected_place")
+            messagebox.showerror("Error", "Failed to delete Place. See log.")
 
     # ---------- Save / Update record ----------
     def _save_record(self):
         try:
             date_s      = self.cr_date.get().strip()
-            trip        = self.cr_trip.get().strip()
+            trip_no_raw = self.cr_trip.get().strip()
             area_name   = self.cr_area_var.get().strip()
             place_code  = self.cr_place_var.get().strip()
             apdn        = (self.cr_apdn_e2.get() or "").strip()
@@ -687,61 +769,76 @@ class GTSApp(ctk.CTk):
             if not place_code:
                 messagebox.showwarning("Missing", "Choose a place."); return
 
+            trip_num_only = trip_no_raw
+            car_only = car_plate
+
+            if self.editing_id and "/" in trip_no_raw:
+                parts = trip_no_raw.split("/")
+                if len(parts) == 3:
+                    _, trip_num_only, car_only = parts
+                elif len(parts) == 2:
+                    _, trip_num_only = parts
+
+            composite_trip = f"{place_code}/{trip_num_only or '-'}"
+            if car_only:
+                composite_trip += f"/{car_only}"
+            
             missing_marks = [k for k in REQUIRED_E if self.estate_marks[k].get() == ""]
             missing_marks += [k for k in REQUIRED_K if self.kilang_marks[k].get() == ""]
 
-            DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
-            ar = DB_CURSOR.fetchone()
-            if not ar: messagebox.showerror("Error", "Selected area not found"); return
-            area_id = ar[0]
-            DB_CURSOR.execute("SELECT id FROM places WHERE area_id = ? AND code = ?", (area_id, place_code))
-            pr = DB_CURSOR.fetchone()
-            if not pr: messagebox.showerror("Error", "Selected place not found"); return
-            place_id = pr[0]
+            with db_cursor() as cur:
+                cur.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
+                ar = cur.fetchone()
+                if not ar: messagebox.showerror("Error", "Selected area not found"); return
+                area_id = ar[0]
 
-            safe_place = (place_code or "PLACE").replace(os.sep, "_")
-            safe_trip  = (trip or "TRIP").replace(os.sep, "_")
-            safe_car   = (car_plate or "NA").replace(os.sep, "_")
-            record_dir = os.path.join(IMG_STORE, safe_place, safe_trip, f"{safe_car} {date_s}")
+                cur.execute("SELECT id FROM places WHERE area_id = ? AND code = ?", (area_id, place_code))
+                pr = cur.fetchone()
+                if not pr: messagebox.showerror("Error", "Selected place not found"); return
+                place_id = pr[0]
 
-            estate_saved = {}
-            kilang_saved = {}
-            for k in REQUIRED_E:
-                new_saved = copy_images_to_store(self.estate_files[k]["paths"], k, record_dir)
-                estate_saved[k] = list(dict.fromkeys(new_saved))[:2]
-            for k in REQUIRED_K:
-                new_saved = copy_images_to_store(self.kilang_files[k]["paths"], k, record_dir)
-                kilang_saved[k] = list(dict.fromkeys(new_saved))[:2]
+                safe_place = (place_code or "PLACE").replace(os.sep, "_")
+                safe_trip  = (trip_no_raw or "TRIP").replace(os.sep, "_")
+                safe_car   = (car_plate or "NA").replace(os.sep, "_")
+                record_dir = os.path.join(IMG_STORE, safe_place, safe_trip, f"{safe_car} {date_s}")
 
-            e_marks_map = {k: self.estate_marks[k].get() for k in REQUIRED_E}
-            k_marks_map = {k: self.kilang_marks[k].get() for k in REQUIRED_K}
-            status = compute_status_from_marks(e_marks_map, k_marks_map)
-            remarks = self.cr_remarks.get("0.0", "end").strip()
-            now = datetime.datetime.now().isoformat(timespec="seconds")
+                estate_saved = {}
+                kilang_saved = {}
+                for k in REQUIRED_E:
+                    new_saved = copy_images_to_store(self.estate_files[k]["paths"], k, record_dir)
+                    estate_saved[k] = list(dict.fromkeys(new_saved))[:2]
+                for k in REQUIRED_K:
+                    new_saved = copy_images_to_store(self.kilang_files[k]["paths"], k, record_dir)
+                    kilang_saved[k] = list(dict.fromkeys(new_saved))[:2]
 
-            if not self.editing_id:
-                DB_CURSOR.execute("""
-                    INSERT INTO gts_records
-                    (date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
-                     estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (date_s, trip, area_id, place_id, apdn, seal_e12, seal_k3, car_plate,
-                      dump_json(estate_saved), dump_json(kilang_saved),
-                      dump_json(e_marks_map), dump_json(k_marks_map),
-                      remarks, status, now, now))
-            else:
-                DB_CURSOR.execute("""
-                    UPDATE gts_records
-                    SET date=?, trip_no=?, area_id=?, place_id=?, apdn_no=?, e12_seal=?, k3_seal=?, car_plate=?,
-                        estate_pics=?, kilang_pics=?, estate_marks=?, kilang_marks=?, remarks=?, status=?, updated_at=?
-                    WHERE id = ?
-                """, (date_s, trip, area_id, place_id, apdn, seal_e12, seal_k3, car_plate,
-                      dump_json(estate_saved), dump_json(kilang_saved),
-                      dump_json(e_marks_map), dump_json(k_marks_map),
-                      remarks, status, now, self.editing_id))
-                self.editing_id = None
+                e_marks_map = {k: self.estate_marks[k].get() for k in REQUIRED_E}
+                k_marks_map = {k: self.kilang_marks[k].get() for k in REQUIRED_K}
+                status = compute_status_from_marks(e_marks_map, k_marks_map)
+                remarks = self.cr_remarks.get("0.0", "end").strip()
+                now = datetime.datetime.now().isoformat(timespec="seconds")
 
-            DB_CONN.commit()
+                if not self.editing_id:
+                    cur.execute("""
+                        INSERT INTO gts_records
+                        (date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                         estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (date_s, composite_trip, area_id, place_id, apdn, seal_e12, seal_k3, car_plate,
+                          dump_json(estate_saved), dump_json(kilang_saved),
+                          dump_json(e_marks_map), dump_json(k_marks_map),
+                          remarks, status, now, now))
+                else:
+                    cur.execute("""
+                        UPDATE gts_records
+                        SET date=?, trip_no=?, area_id=?, place_id=?, apdn_no=?, e12_seal=?, k3_seal=?, car_plate=?,
+                            estate_pics=?, kilang_pics=?, estate_marks=?, kilang_marks=?, remarks=?, status=?, updated_at=?
+                        WHERE id = ?
+                    """, (date_s, composite_trip, area_id, place_id, apdn, seal_e12, seal_k3, car_plate,
+                          dump_json(estate_saved), dump_json(kilang_saved),
+                          dump_json(e_marks_map), dump_json(k_marks_map),
+                          remarks, status, now, self.editing_id))
+                    self.editing_id = None
+
             if missing_marks:
                 self.save_warning_label.configure(text=f" Saved (Incomplete). Missing marks: {len(missing_marks)}")
             else:
@@ -751,7 +848,8 @@ class GTSApp(ctk.CTk):
             self._clear_create_form()
             self.load_view_records()
         except Exception:
-            log_exc("_save_record"); messagebox.showerror("Error", "Failed to save record. See log.")
+            log_exc("_save_record")
+            messagebox.showerror("Error", "Failed to save record. See log.")
 
     # ---------- View Tab ----------
     def _build_view_tab(self):
@@ -764,30 +862,30 @@ class GTSApp(ctk.CTk):
         filter_row = ctk.CTkFrame(f); filter_row.pack(fill="x", padx=12, pady=6)
 
         ctk.CTkLabel(filter_row, text="Date From:", font=self.f_base).grid(row=0, column=0, padx=6, pady=4, sticky="w")
-        self.v_date_from = ctk.StringVar()
+        self.v_date_from = tk.StringVar()
         ctk.CTkEntry(filter_row, textvariable=self.v_date_from, width=120, font=self.f_base).grid(row=0, column=1, padx=6)
 
         ctk.CTkLabel(filter_row, text="Date To:", font=self.f_base).grid(row=0, column=2, padx=6, pady=4, sticky="w")
-        self.v_date_to = ctk.StringVar()
+        self.v_date_to = tk.StringVar()
         ctk.CTkEntry(filter_row, textvariable=self.v_date_to, width=120, font=self.f_base).grid(row=0, column=3, padx=6)
 
         ctk.CTkLabel(filter_row, text="Area:", font=self.f_base).grid(row=1, column=0, padx=6, pady=4, sticky="w")
-        self.v_area = ctk.StringVar()
+        self.v_area = tk.StringVar()
         self.v_area_box = ctk.CTkComboBox(filter_row, variable=self.v_area, values=self._load_area_names(), width=180, font=self.f_base)
         self.v_area_box.grid(row=1, column=1, padx=6)
         self.v_area.trace_add("write", lambda *a: self._reload_view_places())
 
         ctk.CTkLabel(filter_row, text="Place:", font=self.f_base).grid(row=1, column=2, padx=6, pady=4, sticky="w")
-        self.v_place = ctk.StringVar()
+        self.v_place = tk.StringVar()
         self.v_place_box = ctk.CTkComboBox(filter_row, variable=self.v_place, values=[], width=180, font=self.f_base)
         self.v_place_box.grid(row=1, column=3, padx=6)
 
         ctk.CTkLabel(filter_row, text="Trip No:", font=self.f_base).grid(row=2, column=0, padx=6, pady=4, sticky="w")
-        self.v_trip = ctk.StringVar()
+        self.v_trip = tk.StringVar()
         ctk.CTkEntry(filter_row, textvariable=self.v_trip, width=180, font=self.f_base).grid(row=2, column=1, padx=6)
 
         ctk.CTkLabel(filter_row, text="Status:", font=self.f_base).grid(row=2, column=2, padx=6, pady=4, sticky="w")
-        self.v_status = ctk.StringVar()
+        self.v_status = tk.StringVar()
         ctk.CTkComboBox(filter_row, values=["", "Complete", "Incomplete"], variable=self.v_status, width=180, font=self.f_base).grid(row=2, column=3, padx=6)
 
         ctk.CTkButton(filter_row, text="Search", command=self.load_view_records, font=self.f_base).grid(row=0, column=4, padx=10)
@@ -797,11 +895,16 @@ class GTSApp(ctk.CTk):
         body.grid_columnconfigure(0, weight=3); body.grid_columnconfigure(1, weight=2); body.grid_rowconfigure(0, weight=1)
 
         left_wrap = ctk.CTkFrame(body); left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0,8), pady=0)
-        cols = ("id", "date", "trip", "status")
+        cols = ("id", "date", "trip", "area", "place", "car_plate", "status")
         self.tree = ttk.Treeview(left_wrap, columns=cols, show="headings")
         for c in cols:
             self.tree.heading(c, text=c.capitalize(), anchor="w")
-            width = 260 if c == "trip" else 140
+            if c == "trip":
+                width = 220
+            elif c in ("area", "place", "car_plate"):
+                width = 140
+            else:
+                width = 100
             self.tree.column(c, width=width, anchor="w", stretch=True)
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
@@ -828,13 +931,14 @@ class GTSApp(ctk.CTk):
         area = self.v_area.get()
         if not area:
             self.v_place_box.configure(values=[]); self.v_place.set(""); return
-        DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
-        r = DB_CURSOR.fetchone()
-        if not r:
-            self.v_place_box.configure(values=[]); self.v_place.set(""); return
-        aid = r[0]
-        DB_CURSOR.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
-        names = [x[0] for x in DB_CURSOR.fetchall()]
+        with db_cursor() as cur:
+            cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
+            r = cur.fetchone()
+            if not r:
+                self.v_place_box.configure(values=[]); self.v_place.set(""); return
+            aid = r[0]
+            cur.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
+            names = [x[0] for x in cur.fetchall()]
         self.v_place_box.configure(values=names)
         self.v_place.set(names[0] if names else "")
 
@@ -864,23 +968,24 @@ class GTSApp(ctk.CTk):
             if self.v_status.get().strip():
                 query += " AND r.status = ?"; params.append(self.v_status.get().strip())
             query += " ORDER BY r.date DESC, r.id DESC LIMIT 100"
-            DB_CURSOR.execute(query, params)
-            rows = DB_CURSOR.fetchall()
-            for i in self.tree.get_children():
-                self.tree.delete(i)
-            for i, row in enumerate(rows):
-                rid, date_s, trip_no, area_name, place_code, car_plate, status = row
-                place_code = place_code or "-"
-                trip_no_txt   = (trip_no or "").strip()
-                car_plate_txt = (car_plate or "").strip()
-                trip_str = place_code or "-"
-                trip_str += f"/{trip_no_txt if trip_no_txt else '-'}"
-                if car_plate_txt:
-                    trip_str += f"/{car_plate_txt}"
-                tag = 'complete' if status == 'Complete' else 'incomplete'
-                self.tree.insert("", "end", iid=str(rid),
-                                 values=(rid, date_s, trip_str, status), tags=(tag,))
-            self.detail_text.delete("0.0", "end")
+
+            with db_cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+
+                for i in self.tree.get_children():
+                    self.tree.delete(i)
+            
+                for i, row in enumerate(rows):
+                    rid, date_s, trip_no, area_name, place_code, car_plate, status = row
+                    trip_str = (trip_no or "-").strip()
+                    tag = 'complete' if status == 'Complete' else 'incomplete'
+                    self.tree.insert(
+                        "", "end", iid=str(rid),
+                        values=(rid, date_s, trip_str, area_name, place_code, car_plate, status),
+                        tags=(tag,)
+                    )
+                self.detail_text.delete("0.0", "end")
         except Exception:
             log_exc("load_view_records")
             messagebox.showerror("Error", "Failed to load records. See log.")
@@ -896,28 +1001,31 @@ class GTSApp(ctk.CTk):
         if not sel: return
         rid = int(sel[0])
         try:
-            DB_CURSOR.execute("""
-                SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
-                       estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
-                FROM gts_records WHERE id = ?
-            """, (rid,))
-            r = DB_CURSOR.fetchone()
+            with db_cursor() as cur:
+                cur.execute("""
+                    SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                           estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
+                    FROM gts_records WHERE id = ?
+                """, (rid,))
+                r = cur.fetchone()
             if not r: return
+
             (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
              estate_s, kilang_s, e_marks_s, k_marks_s,
              remarks, status, created, updated) = r
 
-            DB_CURSOR.execute("SELECT name FROM areas WHERE id = ?", (aid,))
-            area_name = (DB_CURSOR.fetchone() or ["-"])[0]
-            DB_CURSOR.execute("SELECT code FROM places WHERE id = ?", (pid,))
-            place_code = (DB_CURSOR.fetchone() or ["-"])[0]
+            with db_cursor() as cur:
+                cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+                area_name = (cur.fetchone() or ["-"])[0]
+                cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
+                place_code = (cur.fetchone() or ["-"])[0]
 
             estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
             e_marks = load_json(e_marks_s);     k_marks = load_json(k_marks_s)
 
             lines = [
                 f"Date: {date_s}",
-                f"Trip: {place_code}/{trip or '-'}{('/' + car_plate) if car_plate else ''}",
+                f"Trip: {trip or '-'}",
                 f"Area / Place: {area_name} / {place_code}",
                 f"Car Plate: {car_plate or '-'}",
                 f"APDN (E2): {apdn or '-'}",
@@ -949,33 +1057,51 @@ class GTSApp(ctk.CTk):
 
     def _open_for_edit(self, rid):
         try:
-            DB_CURSOR.execute("""
-                SELECT id, date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
-                       estate_pics, kilang_pics, estate_marks, kilang_marks, remarks
-                FROM gts_records WHERE id = ?
-            """, (rid,))
-            row = DB_CURSOR.fetchone()
+            with db_cursor() as cur:
+                cur.execute("""
+                    SELECT id, date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                           estate_pics, kilang_pics, estate_marks, kilang_marks, remarks
+                    FROM gts_records WHERE id = ?
+                """, (rid,))
+                row = cur.fetchone()
             if not row:
                 messagebox.showerror("Not found", "Record not found."); return
+
             (_id, date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
              estate_s, kilang_s, e_marks_s, k_marks_s, remarks) = row
 
             self.editing_id = rid
             self.cr_date.set(date_s or datetime.date.today().isoformat())
-            self.cr_trip.set(trip or "")
             self.cr_apdn_e2.set(apdn or "")
-            self.cr_car_plate.set(car_plate or "")
             self.cr_seal_e12.set(seal_e12 or "")
             self.cr_seal_k3.set(seal_k3 or "")
 
-            DB_CURSOR.execute("SELECT name FROM areas WHERE id = ?", (aid,))
-            area_name = (DB_CURSOR.fetchone() or [""])[0]
-            self.cr_area_box.configure(values=self._load_area_names())
-            self.cr_area_var.set(area_name)
-            self.cr_area_box.set(area_name)
-            self._reload_places_box()
-            DB_CURSOR.execute("SELECT code FROM places WHERE id = ?", (pid,))
-            pc = (DB_CURSOR.fetchone() or [""])[0]
+            if trip:
+                parts = trip.split("/")
+                if len(parts) == 3:
+                    _, trip_num, car_plate_str = parts
+                    self.cr_trip.set(trip_num)
+                    self.cr_car_plate.set(car_plate_str)
+                elif len(parts) == 2:
+                    _, trip_num = parts
+                    self.cr_trip.set(trip_num)
+                    self.cr_car_plate.set(car_plate or "")
+                else:
+                    self.cr_trip.set(trip)
+                    self.cr_car_plate.set(car_plate or "")
+            else:
+                self.cr_trip.set("")
+                self.cr_car_plate.set(car_plate or "")
+
+            with db_cursor() as cur:
+                cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+                area_name = (cur.fetchone() or [""])[0]
+                self.cr_area_box.configure(values=self._load_area_names())
+                self.cr_area_var.set(area_name)
+                self.cr_area_box.set(area_name)
+                self._reload_places_box()
+                cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
+                pc = (cur.fetchone() or [""])[0]
             self.cr_place_var.set(pc)
             self.cr_place_box.set(pc)
 
@@ -988,11 +1114,13 @@ class GTSApp(ctk.CTk):
 
             estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
             for k in REQUIRED_E:
-                self.estate_files[k]["paths"] = list(estate_data.get(k, []))[:2]
-                self.estate_files[k]["count_widget"].configure(text=f"{len(self.estate_files[k]['paths'])} files")
+                paths = list(estate_data.get(k, []))[:2]  # enforce 2 max
+                self.estate_files[k]["paths"] = paths
+                self.estate_files[k]["count_widget"].configure(text=f"{len(paths)} files")
             for k in REQUIRED_K:
-                self.kilang_files[k]["paths"] = list(kilang_data.get(k, []))[:2]
-                self.kilang_files[k]["count_widget"].configure(text=f"{len(self.kilang_files[k]['paths'])} files")
+                paths = list(kilang_data.get(k, []))[:2]  # enforce 2 max
+                self.kilang_files[k]["paths"] = paths
+                self.kilang_files[k]["count_widget"].configure(text=f"{len(paths)} files")
 
             self.tabview.set("Create Record")
             self._update_save_warning()
@@ -1007,24 +1135,33 @@ class GTSApp(ctk.CTk):
         if not messagebox.askyesno("Confirm", f"Delete record {rid}? This cannot be undone."):
             return
         try:
-            DB_CURSOR.execute("DELETE FROM gts_records WHERE id = ?", (rid,))
-            DB_CONN.commit()
+            with db_cursor() as cur:
+                cur.execute("DELETE FROM gts_records WHERE id = ?", (rid,))
             self.load_view_records()
             messagebox.showinfo("Deleted", "Record deleted.")
         except Exception:
             log_exc("_delete_selected"); messagebox.showerror("Error", "Failed to delete record. See log.")
 
     def _fetch_records(self, where="", params=(), limit=None):
-        cols = ["id", "date", "trip_no", "area_id", "place_id", "apdn_no", "e12_seal", "k3_seal", "car_plate",
-                "estate_pics", "kilang_pics", "estate_marks", "kilang_marks",
-                "remarks", "status", "created_at", "updated_at"]
+        cols = [
+            "id", "date", "trip_no", "area_id", "place_id", "apdn_no",
+            "e12_seal", "k3_seal", "car_plate",
+            "estate_pics", "kilang_pics",
+            "estate_marks", "kilang_marks",
+            "remarks", "status", "created_at", "updated_at"
+        ]
         sql = f"SELECT {', '.join(cols)} FROM gts_records"
-        if where: sql += " WHERE " + where
+        if where:
+            sql += " WHERE " + where
         sql += " ORDER BY date DESC, id DESC"
-        if limit: sql += f" LIMIT {int(limit)}"
-        DB_CURSOR.execute(sql, params)
-        rows = [dict(zip(cols, r)) for r in DB_CURSOR.fetchall()]
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+
+        with db_cursor() as cur:
+            cur.execute(sql, params)
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         return rows
+
 
     # ---------- helpers ----------
     def _update_save_warning(self):
@@ -1046,10 +1183,12 @@ class GTSApp(ctk.CTk):
                 raise ValueError("empty")
             datetime.date.fromisoformat(s)
         except Exception:
+            messagebox.showwarning("Bad date", "Invalid date format. Resetting to today.")
             self.cr_date.set(datetime.date.today().isoformat())
 
 # ---------------- startup login (License + PIN) ----------------
 def _startup_login_guard(max_attempts: int = 5) -> bool:
+    """Check license validity and prompt for Admin PIN before app launch."""
     try:
         import tkinter as _tk
         from tkinter import simpledialog as _simpledialog, messagebox as _messagebox
@@ -1058,6 +1197,7 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         if not cfg:
             _messagebox.showerror("License missing", "license.json not found. Contact SED admin.")
             return False
+
         payload = cfg.get("payload", {})
         sig = cfg.get("signature", "")
         if not os.path.exists(PUBKEY_PATH):
@@ -1067,37 +1207,49 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
             _messagebox.showerror("Invalid license", "Signature verification failed.")
             return False
 
-        import datetime as _dt
+        # hostname binding
         if payload.get("bind_hostname"):
             import socket as _socket
             current_host = _socket.gethostname()
             if payload.get("hostname") != current_host:
-                _messagebox.showerror("License rejected", f"This license is bound to {payload.get('hostname')}, not {current_host}.")
+                _messagebox.showerror("License rejected",
+                                       f"This license is bound to {payload.get('hostname')}, not {current_host}.")
                 return False
+
+        # expiry check
         if payload.get("expires_at"):
             try:
-                expires = _dt.datetime.fromisoformat(payload["expires_at"].replace("Z",""))
+                import datetime as _dt
+                expires = _dt.datetime.fromisoformat(payload["expires_at"].replace("Z", ""))
                 if _dt.datetime.utcnow() > expires:
                     _messagebox.showerror("License expired", f"License expired on {payload['expires_at']}.")
                     return False
             except Exception:
                 pass
 
-        root = _tk.Tk(); root.withdraw()
+        # PIN check
+        root = _tk.Tk()
+        root.withdraw()
         tries = 0
         while tries < max_attempts:
-            pin = _simpledialog.askstring("GTS Login", f"Enter Admin PIN ({max_attempts-tries} tries left):", show="*", parent=root)
+            pin = _simpledialog.askstring(
+                "GTS Login",
+                f"Enter Admin PIN ({max_attempts-tries} tries left):",
+                show="*",
+                parent=root
+            )
             if pin is None:
+                root.destroy()
                 return False
-            expected = payload.get("admin_pin_hash"); salt = payload.get("admin_pin_salt")
+            expected = payload.get("admin_pin_hash")
+            salt = payload.get("admin_pin_salt")
             if expected and salt and _hash_pin(pin, salt) == expected:
+                root.destroy()
                 return True
             tries += 1
             _messagebox.showerror("Incorrect PIN", "PIN is incorrect.")
+        root.destroy()
         _messagebox.showerror("Locked", "Too many failed attempts. Exiting.")
-        return False
-    except Exception:
-        log_exc("_startup_login_guard")
         return False
 
 # ---------------- run ----------------
