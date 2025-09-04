@@ -1,632 +1,1225 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# GTS SED Desktop App — Clean Regeneration (2025-09-04)
 """
-GTS Summary — regenerated single-file app
-
-Key changes vs previous build
-- Robust startup guard: requires public_key.pem + license.json (PIN + signed payload)
-- Window autosizing based on monitor resolution; min sizes set to avoid clipping
-- View tab: ttk.Treeview with multi-select + working _delete_selected_multi()
-- Record form: E12 (seal no.), K3 (seal no.), E2 (APDN) fields added to top section
-- Attachments: max 2 images per label (enforced at UI + DB)
-- Export to PDF: redesigned layout that packs multiple records per page when space allows,
-  but never overlaps images; graceful overflow to next page
-- Removed CSV/Excel exports
-- Replaced emoji ticks with printable characters
-
+Includes:
+- Startup license gate (requires license.json + public_key.pem; Ed25519 signature; Admin PIN prompt).
+- Create tab: APDN (E2), Car Plate, Seal E12 / K3, Estate (E2–E6, E12–E16), Kilang (K1, K3–K7).
+- Image attach limit: max 2 images per label; Remove button per label; images copied into ./images per-record folder.
+- View tab: filters + table + details pane; Edit; Delete; Delete Selected (Multi).
+- PDF export: "Export Selected (PDF)" and "Export All (PDF)" — redesigned layout; multiple records per page; never split a record.
+- Window UX: starts maximized where supported; scroll containers so nothing gets cut off at small resolutions.
 Dependencies:
-  pip install customtkinter Pillow reportlab cryptography
-
-DB: SQLite (gts.db in working folder). Auto-creates tables on first run.
+    pip install customtkinter Pillow reportlab cryptography
 """
 
-import json
 import os
-import sys
+import json
 import sqlite3
-import datetime as dt
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+import datetime
+import logging
+import traceback
+import shutil
+import textwrap
+import hashlib
+import secrets
+import base64
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import font as tkfont
 
-# --- third-party ---
+# ---------- Optional/Required external libs ----------
+# customtkinter is required for UI; show a friendly error if missing
 try:
     import customtkinter as ctk
-    from PIL import Image, ImageTk
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.utils import ImageReader
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.serialization import load_pem_public_key
 except Exception as e:
-    print("Missing dependency:", e)
-    print("Please install: pip install customtkinter Pillow reportlab cryptography")
-    sys.exit(1)
+    raise RuntimeError("customtkinter is required. Install with: pip install customtkinter") from e
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+# PIL is optional (for thumbnails). If unavailable, filenames are shown in the PDF instead.
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
 
-APP_NAME = "GTS Summary"
-DB_PATH = Path("gts.db")
-IMG_THUMB_SIZE = (140, 100)
-MAX_IMAGES_PER_LABEL = 2
-PRINT_TRUE = "✓"   # printable, not emoji
-PRINT_FALSE = "✗"
+# reportlab is required for PDF export. We'll detect availability and guard export actions.
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
 
-# Labels (simplified). Extend as needed
-ESTATE_LABELS = [
-    ("E2", "Ramp ass & APDN"),
-    ("E3", "Timbangan lori tanpa muatan"),
-    ("E4", "E4 label"),
-    ("E5", "E5 label"),
-    ("E6", "E6 label"),
-    ("E12", "Seal number"),
-]
-KILANG_LABELS = [
-    ("K1", "K1 label"),
-    ("K2", "K2 label"),
-    ("K3", "Seal number"),
-    ("K4", "K4 label"),
-    ("K5", "K5 label"),
-    ("K6", "K6 label"),
-    ("K7", "K7 label"),
-]
+# cryptography is required for license verification
+try:
+    from cryptography.hazmat.primitives import serialization
+    CRYPTO_AVAILABLE = True
+except Exception:
+    CRYPTO_AVAILABLE = False
 
-# --------- Licensing ---------
-LICENSE_FILE = Path("license.json")
-PUBLIC_KEY_FILE = Path("public_key.pem")
+# ---------- config & logging ----------
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+os.makedirs(APP_DIR, exist_ok=True)
+IMG_STORE = os.path.join(APP_DIR, "images")
+os.makedirs(IMG_STORE, exist_ok=True)
+LOG_PATH = os.path.join(APP_DIR, "gts_app.log")
+DB_PATH = os.path.join(APP_DIR, "gts_records.db")
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+LICENSE_PATH = os.path.join(APP_DIR, "license.json")  # contains {"payload": {...}, "signature": "base64"}
+PUBKEY_PATH = os.path.join(APP_DIR, "public_key.pem")  # Ed25519 public key
 
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
 
-def verify_license_or_exit():
-    """Verify license.json using public key. Exits app if missing/invalid.
-    Expected license.json fields:
-      {
-        "pin": "1234",                  # numeric or string PIN
-        "payload": { ... arbitrary ... },
-        "signature": "base16/hex string of signature over canonical payload"
-      }
-    The canonical payload is the JSON-dumped payload with sorted keys and no spaces.
-    """
-    if not PUBLIC_KEY_FILE.exists() or not LICENSE_FILE.exists():
-        messagebox.showerror(APP_NAME, "Missing public_key.pem or license.json. Contact admin.")
-        sys.exit(2)
+def log_exc(msg=""):
+    logging.error(msg)
+    logging.error(traceback.format_exc())
+
+# ---------- label sets & constants ----------
+REQUIRED_E = ["E2","E3","E4","E5","E6","E12","E13","E14","E15","E16"]
+REQUIRED_K = ["K1","K3","K4","K5","K6","K7"]
+
+# Printable ASCII marks for PDF (avoid emoji rendering issues)
+MARK_SYMBOL = {"tick":"Y","cross":"N","zero":"0","":""}
+
+DEFAULT_AREAS = {
+    "Sebatik Group": ["SB1", "SB2", "S3", "KF1", "KF2"],
+    "Serudong Group": ["WM1", "WM2", "WM3", "BKS1", "BKS2", "BKS3"],
+    "Sungai Mas": ["SGM", "SGK"],
+    "Bergosong": ["BE"],
+    "Kokorotus": ["KRT"]
+}
+
+# ---------- database ----------
+def get_db_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+def _table_has_column(cur, table, col):
+    cur.execute(f"PRAGMA table_info({table})")
+    return any(r[1] == col for r in cur.fetchall())
+
+def ensure_db_schema():
     try:
-        data = json.loads(LICENSE_FILE.read_text(encoding="utf-8"))
-        pin = str(data.get("pin", "")).strip()
-        payload = data.get("payload", {})
-        sig_hex = data.get("signature", "")
-        if not (pin and payload and sig_hex):
-            raise ValueError("Incomplete license.json")
-        sig = bytes.fromhex(sig_hex)
-        pub = load_pem_public_key(PUBLIC_KEY_FILE.read_bytes())
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        pub.verify(
-            sig,
-            canonical,
-            padding.PKCS1v15(),
-            hashes.SHA256()
-        )
-        # Optionally, prompt for PIN on startup
-        root = tk.Tk(); root.withdraw()
-        user_pin = tk.simpledialog.askstring("License PIN", "Enter PIN to unlock:", show='*')
-        root.destroy()
-        if user_pin is None or str(user_pin).strip() != pin:
-            messagebox.showerror(APP_NAME, "Invalid PIN.")
-            sys.exit(3)
-    except Exception as e:
-        messagebox.showerror(APP_NAME, f"License verification failed: {e}")
-        sys.exit(4)
-
-
-# --------- Database ---------
-class DB:
-    def __init__(self, path: Path):
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
-        self.cur = self.conn.cursor()
-        self._init_schema()
-
-    def _init_schema(self):
-        self.cur.executescript(
-            """
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS areas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS places (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                area_id INTEGER NOT NULL,
+                code TEXT,
+                name TEXT,
+                UNIQUE(area_id, code),
+                FOREIGN KEY(area_id) REFERENCES areas(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS gts_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                apdn TEXT,
+                date TEXT,
+                trip_no TEXT,
+                area_id INTEGER,
+                place_id INTEGER,
+                estate_pics TEXT,
+                kilang_pics TEXT,
+                estate_marks TEXT,
+                kilang_marks TEXT,
+                remarks TEXT,
+                status TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                apdn_no TEXT,
                 e12_seal TEXT,
                 k3_seal TEXT,
-                estate_checks TEXT, -- JSON {label: bool}
-                kilang_checks TEXT, -- JSON {label: bool}
-                notes TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS gts_images (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                record_id INTEGER NOT NULL,
-                label TEXT NOT NULL,
-                path TEXT NOT NULL,
-                FOREIGN KEY(record_id) REFERENCES gts_records(id) ON DELETE CASCADE
-            );
-            """
-        )
-        self.conn.commit()
-
-    # --- CRUD ---
-    def add_record(self, apdn: str, e12: str, k3: str,
-                   estate: Dict[str, bool], kilang: Dict[str, bool],
-                   notes: str) -> int:
-        self.cur.execute(
-            "INSERT INTO gts_records(created_at, apdn, e12_seal, k3_seal, estate_checks, kilang_checks, notes)\n"
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
-            (
-                dt.datetime.now().isoformat(timespec="seconds"),
-                apdn, e12, k3, json.dumps(estate), json.dumps(kilang), notes
+                car_plate TEXT,
+                FOREIGN KEY(area_id) REFERENCES areas(id),
+                FOREIGN KEY(place_id) REFERENCES places(id)
             )
-        )
-        rid = self.cur.lastrowid
-        self.conn.commit()
-        return rid
+        """)
+        # migrate car_plate if older DB
+        if not _table_has_column(cur, "gts_records", "car_plate"):
+            cur.execute("ALTER TABLE gts_records ADD COLUMN car_plate TEXT")
+        conn.commit()
 
-    def update_record(self, rid: int, apdn: str, e12: str, k3: str,
-                      estate: Dict[str, bool], kilang: Dict[str, bool], notes: str):
-        self.cur.execute(
-            "UPDATE gts_records SET apdn=?, e12_seal=?, k3_seal=?, estate_checks=?, kilang_checks=?, notes=? WHERE id=?",
-            (apdn, e12, k3, json.dumps(estate), json.dumps(kilang), notes, rid)
-        )
-        self.conn.commit()
+        # seed defaults
+        for area_name, places in DEFAULT_AREAS.items():
+            cur.execute("INSERT OR IGNORE INTO areas (name) VALUES (?)", (area_name,))
+            cur.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
+            aid = cur.fetchone()[0]
+            for code in places:
+                cur.execute("INSERT OR IGNORE INTO places (area_id, code, name) VALUES (?,?,?)",
+                            (aid, code, code))
+        conn.commit()
+        conn.close()
+    except Exception:
+        log_exc("ensure_db_schema failed")
+        raise
 
-    def delete_records(self, ids: List[int]):
-        if not ids:
-            return
-        q = f"DELETE FROM gts_records WHERE id IN ({','.join('?'*len(ids))})"
-        self.cur.execute(q, ids)
-        self.conn.commit()
+ensure_db_schema()
+DB_CONN = get_db_conn()
+DB_CURSOR = DB_CONN.cursor()
 
-    def list_records(self, limit: Optional[int] = None) -> List[sqlite3.Row]:
-        q = "SELECT * FROM gts_records ORDER BY id DESC"
-        if limit:
-            q += " LIMIT ?"
-            return self.cur.execute(q, (limit,)).fetchall()
-        return self.cur.execute(q).fetchall()
+# ---------- settings & license ----------
+def _load_settings():
+    try:
+        if os.path.exists(SETTINGS_PATH):
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        log_exc("load_settings")
+    return {}
 
-    def get_record(self, rid: int) -> Optional[sqlite3.Row]:
-        return self.cur.execute("SELECT * FROM gts_records WHERE id=?", (rid,)).fetchone()
+def _load_license():
+    try:
+        if os.path.exists(LICENSE_PATH):
+            with open(LICENSE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        log_exc("load_license")
+    return {}
 
-    def list_images(self, rid: int, label: Optional[str] = None) -> List[sqlite3.Row]:
-        if label:
-            return self.cur.execute("SELECT * FROM gts_images WHERE record_id=? AND label=? ORDER BY id", (rid, label)).fetchall()
-        return self.cur.execute("SELECT * FROM gts_images WHERE record_id=? ORDER BY id", (rid,)).fetchall()
+def _canonical_json_bytes(obj):
+    try:
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    except Exception:
+        return b""
 
-    def add_image(self, rid: int, label: str, path: str):
-        # enforce cap at DB level too
-        cur_count = self.cur.execute("SELECT COUNT(*) FROM gts_images WHERE record_id=? AND label=?", (rid, label)).fetchone()[0]
-        if cur_count >= MAX_IMAGES_PER_LABEL:
-            raise ValueError(f"Max {MAX_IMAGES_PER_LABEL} images for {label}")
-        self.cur.execute("INSERT INTO gts_images(record_id, label, path) VALUES(?,?,?)", (rid, label, path))
-        self.conn.commit()
+def _hash_pin(pin: str, salt_hex: str) -> str:
+    h = hashlib.sha256()
+    try:
+        h.update(bytes.fromhex(salt_hex))
+    except Exception:
+        h.update(salt_hex.encode("utf-8"))
+    h.update((pin or "").encode("utf-8"))
+    return h.hexdigest()
 
-    def remove_image(self, img_id: int):
-        self.cur.execute("DELETE FROM gts_images WHERE id=?", (img_id,))
-        self.conn.commit()
+def _verify_license_signature(lic_payload: dict, signature_b64: str) -> bool:
+    if not CRYPTO_AVAILABLE:
+        return False
+    try:
+        if not os.path.exists(PUBKEY_PATH):
+            return False
+        with open(PUBKEY_PATH, "rb") as f:
+            pub = serialization.load_pem_public_key(f.read())
+        sig = base64.b64decode(signature_b64)
+        pub.verify(sig, _canonical_json_bytes(lic_payload))
+        return True
+    except Exception:
+        return False
 
+# ---------- helpers ----------
+def dump_json(d):
+    try: return json.dumps(d, ensure_ascii=False)
+    except Exception: return "{}"
 
-# --------- UI ---------
-ctk.set_appearance_mode("System")
+def load_json(s):
+    try: return json.loads(s) if s else {}
+    except Exception: return {}
+
+def copy_images_to_store_if_needed(paths, label, date_str, trip_no, record_dir=None):
+    saved = []
+    target_dir = record_dir or IMG_STORE
+    os.makedirs(target_dir, exist_ok=True)
+    for idx, p in enumerate(paths):
+        try:
+            # If already inside store, keep as-is
+            if isinstance(p, str) and os.path.commonpath([os.path.abspath(p), os.path.abspath(target_dir)]) == os.path.abspath(target_dir):
+                saved.append(p)
+                continue
+        except Exception:
+            pass
+        try:
+            base_ext = os.path.splitext(p)[1]
+            safe_trip = (trip_no or "").replace(" ", "_") or "trip"
+            ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            fname = f"{date_str}_{safe_trip}_{label}_{idx}_{ts}{base_ext}"
+            dest = os.path.join(target_dir, fname)
+            shutil.copy2(p, dest)
+            saved.append(dest)
+        except Exception:
+            log_exc(f"copy image failed for {p}")
+    # de-dup
+    out, seen = [], set()
+    for s in saved:
+        if s not in seen:
+            seen.add(s); out.append(s)
+    return out
+
+def compute_status_from_marks(e_marks, k_marks):
+    for v in e_marks.values():
+        if v in ("", None, "cross"): return "Incomplete"
+    for v in k_marks.values():
+        if v in ("", None, "cross"): return "Incomplete"
+    return "Complete"
+
+# ---------- Scroll container ----------
+class _XYScrollFrame(ctk.CTkFrame):
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self._canvas = tk.Canvas(self, highlightthickness=0)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        self._vbar = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._vbar.grid(row=0, column=1, sticky="ns")
+        self._hbar = ttk.Scrollbar(self, orient="horizontal", command=self._canvas.xview)
+        self._hbar.grid(row=1, column=0, sticky="ew")
+        self._canvas.configure(yscrollcommand=self._vbar.set, xscrollcommand=self._hbar.set)
+        self.content = ctk.CTkFrame(self)
+        self._win = self._canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self.content.bind("<Configure>", self._on_content_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+        self._bind_mousewheel(self._canvas)
+        self._bind_mousewheel(self.content)
+
+    def _on_content_configure(self, event):
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self._canvas.itemconfigure(self._win, width=max(self.content.winfo_reqwidth(), event.width))
+
+    def _on_mousewheel(self, event):
+        if event.state & 0x0001:
+            self._canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
+        else:
+            delta = -1 if event.delta < 0 else 1
+            self._canvas.yview_scroll(delta, "units")
+
+    def _on_mousewheel_linux(self, event):
+        if event.num == 4: self._canvas.yview_scroll(-1, "units")
+        elif event.num == 5: self._canvas.yview_scroll(1, "units")
+
+    def _bind_mousewheel(self, widget):
+        try:
+            for t in (widget, self._canvas, self.content, self.winfo_toplevel()):
+                try:
+                    t.bind("<MouseWheel>", self._on_mousewheel, add="+")
+                    t.bind("<Shift-MouseWheel>", self._on_mousewheel, add="+")
+                    t.bind("<Button-4>", self._on_mousewheel_linux, add="+")
+                    t.bind("<Button-5>", self._on_mousewheel_linux, add="+")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+# ---------- UI Theme ----------
+ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
+def roboto(size=12, weight="normal"):
+    return ctk.CTkFont(family="Roboto", size=size, weight=weight)
 
+# ---------- App ----------
 class GTSApp(ctk.CTk):
-    def __init__(self, db: DB):
+    def _safe_zoom(self):
+        try: self.state('zoomed')
+        except Exception: pass
+
+    def __init__(self):
         super().__init__()
-        self.db = db
-        self.title(APP_NAME)
-        # Autosize to monitor, with min size
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        w = int(sw * 0.9)
-        h = int(sh * 0.9)
-        w = max(w, 1100)
-        h = max(h, 720)
-        x = (sw - w) // 2
-        y = (sh - h) // 2
-        self.geometry(f"{w}x{h}+{x}+{y}")
-        self.minsize(1000, 680)
+        self.title("SED — GTS Recording System")
+        self.geometry("1320x880")
+        self.minsize(920, 600)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.after(100, self._safe_zoom)
 
-        self._build_ui()
+        self.editing_id = None
+        self.f_base = roboto(12)
+        self.f_bold = roboto(12, "bold")
+        self.f_h1 = roboto(16, "bold")
 
-    # --- UI scaffolding ---
-    def _build_ui(self):
-        self.tabs = ctk.CTkTabview(self)
-        self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
-        self.tab_create = self.tabs.add("Create Record")
-        self.tab_view = self.tabs.add("View Records")
-        self.tab_export = self.tabs.add("Export PDF")
+        style = ttk.Style(self)
+        style.configure("Treeview", font=("Roboto", 11), rowheight=26)
+        style.configure("Treeview.Heading", font=("Roboto", 12, "bold"))
+        try:
+            tkfont.nametofont("TkDefaultFont").configure(family="Roboto", size=11)
+        except Exception:
+            pass
+
+        self.tabview = ctk.CTkTabview(self, width=1200, height=820)
+        self.tabview.pack(padx=12, pady=12, fill="both", expand=True)
+        self.tabview.add("Create Record")
+        self.tabview.add("View Records")
+        self.create_tab = self.tabview.tab("Create Record")
+        self.view_tab = self.tabview.tab("View Records")
 
         self._build_create_tab()
         self._build_view_tab()
-        self._build_export_tab()
+        self.load_view_records()
 
-    # ---------- Create Record Tab ----------
+    # ---------- Create Tab ----------
     def _build_create_tab(self):
-        wrap = ctk.CTkFrame(self.tab_create)
-        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        scroll = _XYScrollFrame(self.create_tab)
+        scroll.pack(fill="both", expand=True, padx=12, pady=8)
+        f = scroll.content
+        ctk.CTkLabel(f, text="Create / Edit Record", font=self.f_h1).pack(pady=(6, 8))
 
-        top = ctk.CTkFrame(wrap)
-        top.pack(fill="x", padx=4, pady=4)
+        top = ctk.CTkFrame(f); top.pack(fill="x", padx=12, pady=4)
 
-        # APDN, E12, K3
-        ctk.CTkLabel(top, text="APDN (E2)").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        self.ent_apdn = ctk.CTkEntry(top, width=180)
-        self.ent_apdn.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        ctk.CTkLabel(top, text="Date (YYYY-MM-DD):", font=self.f_base).grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        self.cr_date = ctk.StringVar(value=datetime.date.today().isoformat())
+        ctk.CTkEntry(top, textvariable=self.cr_date, width=140, font=self.f_base).grid(row=0, column=1, padx=6)
 
-        ctk.CTkLabel(top, text="E12 Seal").grid(row=0, column=2, padx=6, pady=6, sticky="e")
-        self.ent_e12 = ctk.CTkEntry(top, width=180)
-        self.ent_e12.grid(row=0, column=3, padx=6, pady=6, sticky="w")
+        ctk.CTkLabel(top, text="Trip No:", font=self.f_base).grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        self.cr_trip = ctk.StringVar()
+        ctk.CTkEntry(top, textvariable=self.cr_trip, width=120, font=self.f_base).grid(row=0, column=3, padx=6)
 
-        ctk.CTkLabel(top, text="K3 Seal").grid(row=0, column=4, padx=6, pady=6, sticky="e")
-        self.ent_k3 = ctk.CTkEntry(top, width=180)
-        self.ent_k3.grid(row=0, column=5, padx=6, pady=6, sticky="w")
+        ctk.CTkLabel(top, text="APDN (E2):", font=self.f_base).grid(row=0, column=4, padx=6, pady=6, sticky="w")
+        self.cr_apdn_e2 = ctk.StringVar()
+        ctk.CTkEntry(top, textvariable=self.cr_apdn_e2, width=140, font=self.f_base).grid(row=0, column=5, padx=6)
 
-        # Estate / Kilang sections side-by-side, each vertical list
-        mid = ctk.CTkFrame(wrap)
-        mid.pack(fill="x", padx=4, pady=6)
+        ctk.CTkLabel(top, text="Car Plate:", font=self.f_base).grid(row=0, column=6, padx=6, pady=6, sticky="w")
+        self.cr_car_plate = ctk.StringVar()
+        ctk.CTkEntry(top, textvariable=self.cr_car_plate, width=140, font=self.f_base).grid(row=0, column=7, padx=6)
 
-        estate_fr = ctk.CTkFrame(mid)
-        estate_fr.pack(side="left", fill="y", padx=8)
-        ctk.CTkLabel(estate_fr, text="Estate labels").pack(anchor="w", pady=(4,2))
-        self.estate_vars: Dict[str, tk.BooleanVar] = {}
-        for code, title in ESTATE_LABELS:
-            var = tk.BooleanVar(value=False)
-            self.estate_vars[code] = var
-            row = ctk.CTkFrame(estate_fr)
-            row.pack(fill="x", pady=2)
-            ctk.CTkCheckBox(row, text=f"{code} — {title}", variable=var).pack(side="left")
-            ctk.CTkButton(row, text="Attach", width=70, command=lambda c=code: self._attach_images(c)).pack(side="right", padx=4)
+        ctk.CTkLabel(top, text="Area:", font=self.f_base).grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        self.cr_area_var = ctk.StringVar()
+        self.cr_area_box = ctk.CTkComboBox(top, variable=self.cr_area_var,
+                                           values=self._load_area_names(), width=220, font=self.f_base)
+        self.cr_area_box.grid(row=1, column=1, padx=6)
 
-        kilang_fr = ctk.CTkFrame(mid)
-        kilang_fr.pack(side="left", fill="y", padx=16)
-        ctk.CTkLabel(kilang_fr, text="Kilang labels").pack(anchor="w", pady=(4,2))
-        self.kilang_vars: Dict[str, tk.BooleanVar] = {}
-        for code, title in KILANG_LABELS:
-            var = tk.BooleanVar(value=False)
-            self.kilang_vars[code] = var
-            row = ctk.CTkFrame(kilang_fr)
-            row.pack(fill="x", pady=2)
-            ctk.CTkCheckBox(row, text=f"{code} — {title}", variable=var).pack(side="left")
-            ctk.CTkButton(row, text="Attach", width=70, command=lambda c=code: self._attach_images(c)).pack(side="right", padx=4)
+        ctk.CTkLabel(top, text="Place:", font=self.f_base).grid(row=1, column=2, padx=6, pady=6, sticky="w")
+        self.cr_place_var = ctk.StringVar()
+        self.cr_place_box = ctk.CTkComboBox(top, variable=self.cr_place_var,
+                                            values=self._load_places_for_current_area(), width=160, font=self.f_base)
+        self.cr_place_box.grid(row=1, column=3, padx=6)
 
-        # Notes & Save
-        bottom = ctk.CTkFrame(wrap)
-        bottom.pack(fill="both", expand=True, padx=4, pady=6)
-        ctk.CTkLabel(bottom, text="Notes").pack(anchor="w")
-        self.txt_notes = tk.Text(bottom, height=5)
-        self.txt_notes.pack(fill="x", pady=4)
-        ctk.CTkButton(bottom, text="Save Record", command=self._save_record, height=36).pack(anchor="e", pady=6)
+        ctk.CTkLabel(top, text="Seal E12:", font=self.f_base).grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        self.cr_seal_e12 = ctk.StringVar()
+        ctk.CTkEntry(top, textvariable=self.cr_seal_e12, width=140, font=self.f_base).grid(row=2, column=1, padx=6)
 
-        # live attachments preview panel
-        self.preview_panel = ctk.CTkScrollableFrame(bottom, height=160)
-        self.preview_panel.pack(fill="x", pady=(8,4))
-        ctk.CTkLabel(self.preview_panel, text="Attached images (per label max 2)").pack(anchor="w")
-        self._preview_imgs: Dict[str, List[ImageTk.PhotoImage]] = {}
+        ctk.CTkLabel(top, text="Seal K3:", font=self.f_base).grid(row=2, column=2, padx=6, pady=6, sticky="w")
+        self.cr_seal_k3 = ctk.StringVar()
+        ctk.CTkEntry(top, textvariable=self.cr_seal_k3, width=140, font=self.f_base).grid(row=2, column=3, padx=6)
 
-        # working area for pending attachments before save
-        self._pending_attachments: Dict[str, List[str]] = {code: [] for code, _ in ESTATE_LABELS + KILANG_LABELS}
+        ctk.CTkButton(top, text="Add Area", command=self._add_area_dialog, font=self.f_base).grid(row=1, column=4, padx=6)
+        ctk.CTkButton(top, text="Add Place", command=self._add_place_dialog, font=self.f_base).grid(row=1, column=5, padx=6)
+        ctk.CTkButton(top, text="Manage Areas/Places", command=self._guarded_manage_places_dialog, font=self.f_base).grid(row=1, column=6, padx=6)
 
-    def _attach_images(self, label_code: str):
-        existing = self._pending_attachments[label_code]
-        remain = MAX_IMAGES_PER_LABEL - len(existing)
-        if remain <= 0:
-            messagebox.showinfo(APP_NAME, f"{label_code}: already attached {MAX_IMAGES_PER_LABEL} images")
-            return
-        paths = filedialog.askopenfilenames(title=f"Attach images for {label_code}", filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif")])
-        if not paths:
-            return
-        to_add = list(paths)[:remain]
-        existing.extend(to_add)
-        self._refresh_preview()
+        self.cr_area_var.trace_add("write", lambda *_: self._reload_places_box())
 
-    def _refresh_preview(self):
-        for w in list(self.preview_panel.winfo_children())[1:]:  # keep header label
-            w.destroy()
-        self._preview_imgs.clear()
-        for code, files in self._pending_attachments.items():
-            if not files:
-                continue
-            row = ctk.CTkFrame(self.preview_panel)
-            row.pack(fill="x", pady=2)
-            ctk.CTkLabel(row, text=f"{code}").pack(side="left", padx=6)
-            holder: List[ImageTk.PhotoImage] = []
-            for p in files:
-                try:
-                    img = Image.open(p).copy()
-                    img.thumbnail(IMG_THUMB_SIZE)
-                    tkimg = ImageTk.PhotoImage(img)
-                    holder.append(tkimg)
-                    lbl = ctk.CTkLabel(row, image=tkimg, text="")
-                    lbl.pack(side="left", padx=3)
-                except Exception:
-                    pass
-            self._preview_imgs[code] = holder
+        ctk.CTkLabel(f, text="Estate (E2–E6, E12–E16)", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
+        self.estate_files = {}; self.estate_marks = {}
+        self._build_mark_attach_grid(f, REQUIRED_E, self.estate_files, self.estate_marks)
 
-    def _save_record(self):
-        apdn = self.ent_apdn.get().strip()
-        e12 = self.ent_e12.get().strip()
-        k3 = self.ent_k3.get().strip()
-        est = {k: bool(v.get()) for k, v in self.estate_vars.items()}
-        kil = {k: bool(v.get()) for k, v in self.kilang_vars.items()}
-        notes = self.txt_notes.get("1.0", "end").strip()
+        ctk.CTkLabel(f, text="Kilang (K1, K3–K7)", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
+        self.kilang_files = {}; self.kilang_marks = {}
+        self._build_mark_attach_grid(f, REQUIRED_K, self.kilang_files, self.kilang_marks)
 
-        if not apdn:
-            messagebox.showinfo(APP_NAME, "APDN is required")
-            return
+        btn_row = ctk.CTkFrame(f); btn_row.pack(fill="x", padx=12, pady=10)
+        ctk.CTkButton(btn_row, text="Save Record", command=self._save_record, font=self.f_base).pack(side="left")
+        ctk.CTkButton(btn_row, text="Switch to View", fg_color="transparent",
+                      command=lambda: self.tabview.set("View Records"), font=self.f_base).pack(side="right")
+
+        self.save_warning_label = ctk.CTkLabel(btn_row, text="", font=self.f_base); self.save_warning_label.pack(side="right", padx=12)
+        ctk.CTkLabel(f, text="Remarks", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
+        self.cr_remarks = ctk.CTkTextbox(f, height=100, font=self.f_base, wrap="word")
+        self.cr_remarks.pack(fill="x", padx=12)
+
+        self._update_save_warning()
+
+    def _build_mark_attach_grid(self, parent, labels, files_store, marks_store):
+        wrap = ctk.CTkFrame(parent); wrap.pack(fill="both", expand=True, padx=6, pady=6)
+        for i, lab in enumerate(labels):
+            frame = ctk.CTkFrame(wrap); frame.grid(row=i, column=0, padx=6, pady=4, sticky="w")
+            ctk.CTkLabel(frame, text=lab, width=44, font=self.f_base).pack(side="left", padx=(4, 6))
+
+            btncol = ctk.CTkFrame(frame); btncol.pack(side="left")
+            ctk.CTkButton(btncol, text="Attach", width=80,
+                          command=lambda l=lab, fs=files_store: self._attach_files(l, fs),
+                          font=self.f_base).pack(side="top")
+            ctk.CTkButton(btncol, text="Remove", width=80, fg_color="gray80",
+                          command=lambda l=lab, fs=files_store: self._remove_files(l, fs),
+                          font=self.f_base).pack(side="top", pady=(4,0))
+
+            count_lbl = ctk.CTkLabel(frame, text="0 files", width=90, font=self.f_base)
+            count_lbl.pack(side="left", padx=(6, 0))
+
+            var = tk.StringVar(value="")
+            var.trace_add("write", lambda *_: self._update_save_warning())
+            rb = ctk.CTkFrame(frame); rb.pack(side="left", padx=(8, 4))
+            ctk.CTkRadioButton(rb, text="Y", variable=var, value="tick", font=self.f_base).pack(side="left", padx=2)
+            ctk.CTkRadioButton(rb, text="N", variable=var, value="cross", font=self.f_base).pack(side="left", padx=2)
+            ctk.CTkRadioButton(rb, text="0", variable=var, value="zero", font=self.f_base).pack(side="left", padx=2)
+
+            files_store[lab] = {"paths": [], "count_widget": count_lbl}
+            marks_store[lab] = var
+
+    def _attach_files(self, label, storage):
         try:
-            rid = self.db.add_record(apdn, e12, k3, est, kil, notes)
-            # persist attachments
-            for code, files in self._pending_attachments.items():
-                for p in files:
-                    self.db.add_image(rid, code, p)
-            # reset form
-            self.ent_apdn.delete(0, 'end')
-            self.ent_e12.delete(0, 'end')
-            self.ent_k3.delete(0, 'end')
-            for v in self.estate_vars.values(): v.set(False)
-            for v in self.kilang_vars.values(): v.set(False)
-            self.txt_notes.delete('1.0', 'end')
-            self._pending_attachments = {code: [] for code, _ in ESTATE_LABELS + KILANG_LABELS}
-            self._refresh_preview()
-            messagebox.showinfo(APP_NAME, f"Record #{rid} saved")
-            self.load_view_records()
-            self.tabs.set("View Records")
-        except Exception as e:
-            messagebox.showerror(APP_NAME, f"Failed to save: {e}")
+            paths = filedialog.askopenfilenames(title=f"Select image(s) for {label}",
+                                                filetypes=[("Images","*.jpg *.jpeg *.png *.bmp *.gif"), ("All files","*.*")])
+            if not paths: return
+            current = storage[label]["paths"]
+            remaining = max(0, 2 - len(current))
+            if remaining == 0:
+                messagebox.showinfo("Limit reached", f"{label} already has 2 images attached."); return
+            to_add = list(paths)[:remaining]
+            if len(paths) > remaining:
+                messagebox.showwarning("Limit", f"Only {remaining} more image(s) allowed for {label}. Extra files ignored.")
+            current.extend(to_add)
+            storage[label]["count_widget"].configure(text=f"{len(storage[label]['paths'])} files")
+        except Exception:
+            log_exc("_attach_files")
+            messagebox.showerror("Error", "Failed to attach files. See log.")
 
-    # ---------- View Records Tab ----------
+    def _remove_files(self, label, storage):
+        try:
+            storage[label]["paths"] = []
+            storage[label]["count_widget"].configure(text="0 files")
+        except Exception:
+            log_exc("_remove_files")
+
+    def _clear_create_form(self):
+        self.editing_id = None
+        self.cr_date.set(datetime.date.today().isoformat())
+        self.cr_trip.set("")
+        self.cr_apdn_e2.set("")
+        self.cr_car_plate.set("")
+        self.cr_seal_e12.set("")
+        self.cr_seal_k3.set("")
+        self.cr_remarks.delete("0.0", "end")
+        self.cr_area_box.configure(values=self._load_area_names())
+        self.cr_place_box.configure(values=self._load_places_for_current_area())
+        for d in (self.estate_files, self.kilang_files):
+            for k in d:
+                d[k]["paths"] = []
+                d[k]["count_widget"].configure(text="0 files")
+        for m in (self.estate_marks, self.kilang_marks):
+            for k in m:
+                m[k].set("")
+        self._update_save_warning()
+
+    # ---------- Areas & Places ----------
+    def _load_area_names(self):
+        try:
+            DB_CURSOR.execute("SELECT name FROM areas ORDER BY name")
+            return [r[0] for r in DB_CURSOR.fetchall()]
+        except Exception:
+            log_exc("_load_area_names"); return []
+
+    def _load_places_for_current_area(self):
+        try:
+            area = self.cr_area_var.get()
+            if not area: return []
+            DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
+            r = DB_CURSOR.fetchone()
+            if not r: return []
+            aid = r[0]
+            DB_CURSOR.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
+            return [x[0] for x in DB_CURSOR.fetchall()]
+        except Exception:
+            log_exc("_load_places_for_current_area"); return []
+
+    def _reload_places_box(self):
+        vals = self._load_places_for_current_area()
+        self.cr_place_box.configure(values=vals)
+        self.cr_place_var.set(vals[0] if vals else "")
+
+    def _add_area_dialog(self):
+        name = simpledialog.askstring("Add Area", "Enter new area name:", parent=self)
+        if not name: return
+        try:
+            DB_CURSOR.execute("INSERT OR IGNORE INTO areas (name) VALUES (?)", (name.strip(),))
+            DB_CONN.commit()
+            self.cr_area_box.configure(values=self._load_area_names())
+            self.cr_area_var.set(name.strip())
+            self._reload_places_box()
+        except Exception:
+            log_exc("_add_area_dialog")
+            messagebox.showerror("Error", "Failed to add area. See log.")
+
+    def _add_place_dialog(self):
+        area = self.cr_area_var.get()
+        if not area:
+            messagebox.showwarning("No area", "Select or create an area first."); return
+        code = simpledialog.askstring("Add Place", "Enter place code (e.g. 'SB4'):", parent=self)
+        if not code: return
+        try:
+            DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
+            r = DB_CURSOR.fetchone()
+            if not r:
+                messagebox.showerror("Error", "Area not found."); return
+            aid = r[0]
+            DB_CURSOR.execute("INSERT OR IGNORE INTO places (area_id, code, name) VALUES (?,?,?)",
+                              (aid, code.strip(), code.strip()))
+            DB_CONN.commit()
+            self._reload_places_box()
+            self.cr_place_var.set(code.strip())
+        except Exception:
+            log_exc("_add_place_dialog")
+            messagebox.showerror("Error", "Failed to add place. See log.")
+
+    def _guarded_manage_places_dialog(self):
+        try:
+            cfg = _load_license()
+            payload = cfg.get("payload", {}); sig = cfg.get("signature", "")
+            if not payload or not sig or not _verify_license_signature(payload, sig) or \
+               "admin_pin_hash" not in payload or "admin_pin_salt" not in payload:
+                messagebox.showinfo("Restricted", "This copy has no valid license. Areas/Places are read-only.\nAsk SED admin to provision a signed license.")
+                return
+            if payload.get("bind_hostname"):
+                import socket
+                if payload.get("hostname") != socket.gethostname():
+                    messagebox.showerror("License rejected", f"License bound to {payload.get('hostname')}."); return
+            if payload.get("expires_at"):
+                try:
+                    exp = datetime.datetime.fromisoformat(payload["expires_at"].replace("Z",""))
+                    if datetime.datetime.utcnow() > exp:
+                        messagebox.showerror("License expired", f"License expired on {payload['expires_at']}."); return
+                except Exception: pass
+            pin = simpledialog.askstring("Admin PIN", "Enter Admin PIN to proceed:", parent=self, show="*")
+            if pin is None: return
+            expected, salt = payload.get("admin_pin_hash"), payload.get("admin_pin_salt")
+            if _hash_pin(pin, salt) != expected:
+                messagebox.showerror("Denied", "Incorrect PIN."); return
+            self._manage_places_dialog()
+        except Exception:
+            log_exc("_guarded_manage_places_dialog")
+
+    def _manage_places_dialog(self):
+        try:
+            dlg = tk.Toplevel(self); dlg.title("Manage Areas & Places"); dlg.geometry("680x460")
+            dlg.transient(self); dlg.grab_set()
+            lb_font = tkfont.Font(family="Roboto", size=11)
+            container = tk.Frame(dlg); container.pack(fill="both", expand=True, padx=8, pady=8)
+            left = tk.Frame(container); left.pack(side="left", fill="y", padx=(0, 8))
+            tk.Label(left, text="Areas", font=lb_font).pack()
+            area_list = tk.Listbox(left, width=30, height=18, exportselection=False, font=lb_font); area_list.pack(fill="y")
+            for a in self._load_area_names(): area_list.insert("end", a)
+
+            mid = tk.Frame(container); mid.pack(side="left", fill="both", expand=True)
+            tk.Label(mid, text="Places in selected area", font=lb_font).pack()
+            place_list = tk.Listbox(mid, width=32, height=18, exportselection=False, font=lb_font); place_list.pack(fill="both", expand=True)
+
+            def on_area_select(evt=None):
+                sel = area_list.curselection()
+                place_list.delete(0, "end")
+                if not sel: return
+                area = area_list.get(sel[0])
+                DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
+                r = DB_CURSOR.fetchone(); 
+                if not r: return
+                aid = r[0]
+                DB_CURSOR.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
+                for p in DB_CURSOR.fetchall(): place_list.insert("end", p[0])
+
+            def delete_place():
+                sel = place_list.curselection()
+                if not sel: messagebox.showinfo("Select", "Select a place to delete.", parent=dlg); return
+                place_code = place_list.get(sel[0])
+                sel_area = area_list.curselection()
+                if not sel_area: return
+                area_name = area_list.get(sel_area[0])
+                DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
+                r = DB_CURSOR.fetchone(); aid = r[0]
+                if not messagebox.askyesno("Confirm", f"Delete place {place_code}?", parent=dlg): return
+                DB_CURSOR.execute("DELETE FROM places WHERE area_id = ? AND code = ?", (aid, place_code))
+                DB_CONN.commit(); on_area_select()
+
+            def delete_area():
+                sel = area_list.curselection()
+                if not sel: messagebox.showinfo("Select", "Select an area to delete.", parent=dlg); return
+                area_name = area_list.get(sel[0])
+                if not messagebox.askyesno("Confirm", f"Delete area '{area_name}' and all its places?", parent=dlg): return
+                DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
+                r = DB_CURSOR.fetchone()
+                if r:
+                    aid = r[0]
+                    DB_CURSOR.execute("DELETE FROM places WHERE area_id = ?", (aid,))
+                    DB_CURSOR.execute("DELETE FROM areas WHERE id = ?", (aid,))
+                    DB_CONN.commit()
+                area_list.delete(sel[0]); place_list.delete(0, "end")
+                self.cr_area_box.configure(values=self._load_area_names()); self._reload_places_box()
+
+            area_list.bind("<<ListboxSelect>>", on_area_select)
+
+            btnf = tk.Frame(dlg); btnf.pack(fill="x", side="bottom", padx=8, pady=8)
+            tk.Button(btnf, text="Delete Place", command=delete_place, font=lb_font).pack(side="left", padx=6)
+            tk.Button(btnf, text="Delete Area", command=delete_area, font=lb_font).pack(side="left", padx=6)
+            tk.Button(btnf, text="Close", command=dlg.destroy, font=lb_font).pack(side="right", padx=6)
+        except Exception:
+            log_exc("manage_places_dialog")
+
+    # ---------- Save/Update ----------
+    def _save_record(self):
+        try:
+            date_s = self.cr_date.get().strip()
+            trip = self.cr_trip.get().strip()
+            area_name = self.cr_area_var.get().strip()
+            place_code = self.cr_place_var.get().strip()
+            apdn = (self.cr_apdn_e2.get() or "").strip()
+            car_plate = (self.cr_car_plate.get() or "").strip()
+            seal_e12 = (self.cr_seal_e12.get() or "").strip()
+            seal_k3 = (self.cr_seal_k3.get() or "").strip()
+
+            if not date_s:
+                messagebox.showwarning("Missing", "Please enter date."); return
+            try:
+                datetime.date.fromisoformat(date_s)
+            except Exception:
+                messagebox.showwarning("Bad date", "Date must be YYYY-MM-DD"); return
+            if not area_name: messagebox.showwarning("Missing", "Choose an area."); return
+            if not place_code: messagebox.showwarning("Missing", "Choose a place."); return
+
+            DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area_name,))
+            ar = DB_CURSOR.fetchone()
+            if not ar: messagebox.showerror("Error", "Selected area not found"); return
+            area_id = ar[0]
+            DB_CURSOR.execute("SELECT id FROM places WHERE area_id = ? AND code = ?", (area_id, place_code))
+            pr = DB_CURSOR.fetchone()
+            if not pr: messagebox.showerror("Error", "Selected place not found"); return
+            place_id = pr[0]
+
+            try:
+                trip_name = f"{place_code}/{trip or ''}{('/' + car_plate) if car_plate else ''}".strip('/')
+                record_dir = os.path.join(IMG_STORE, f"{trip_name} {date_s}")
+                os.makedirs(record_dir, exist_ok=True)
+            except Exception:
+                record_dir = IMG_STORE
+
+            estate_saved, kilang_saved = {}, {}
+            for k in REQUIRED_E:
+                new_saved = copy_images_to_store_if_needed(self.estate_files[k]["paths"], k, date_s, trip, record_dir=record_dir)
+                estate_saved[k] = list(dict.fromkeys(new_saved))[:2]
+            for k in REQUIRED_K:
+                new_saved = copy_images_to_store_if_needed(self.kilang_files[k]["paths"], k, date_s, trip, record_dir=record_dir)
+                kilang_saved[k] = list(dict.fromkeys(new_saved))[:2]
+
+            e_marks_map = {k: self.estate_marks[k].get() for k in REQUIRED_E}
+            k_marks_map = {k: self.kilang_marks[k].get() for k in REQUIRED_K}
+            status = compute_status_from_marks(e_marks_map, k_marks_map)
+            remarks = self.cr_remarks.get("0.0", "end").strip()
+            now = datetime.datetime.now().isoformat(timespec="seconds")
+
+            if not self.editing_id:
+                DB_CURSOR.execute("""
+                    INSERT INTO gts_records
+                    (date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                     estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (date_s, trip, area_id, place_id, apdn, seal_e12, seal_k3, car_plate,
+                      dump_json(estate_saved), dump_json(kilang_saved),
+                      dump_json(e_marks_map), dump_json(k_marks_map),
+                      remarks, status, now, now))
+            else:
+                DB_CURSOR.execute("""
+                    UPDATE gts_records
+                    SET date=?, trip_no=?, area_id=?, place_id=?, apdn_no=?, e12_seal=?, k3_seal=?, car_plate=?,
+                        estate_pics=?, kilang_pics=?, estate_marks=?, kilang_marks=?, remarks=?, status=?, updated_at=?
+                    WHERE id = ?
+                """, (date_s, trip, area_id, place_id, apdn, seal_e12, seal_k3, car_plate,
+                      dump_json(estate_saved), dump_json(kilang_saved),
+                      dump_json(e_marks_map), dump_json(k_marks_map),
+                      remarks, status, now, self.editing_id))
+                self.editing_id = None
+
+            DB_CONN.commit()
+            self.save_warning_label.configure(text=f"Saved. Status: {status}")
+            messagebox.showinfo("Saved", f"Record saved. Status: {status}")
+            self._clear_create_form(); self.load_view_records()
+        except Exception:
+            log_exc("_save_record")
+            messagebox.showerror("Error", "Failed to save record. See log.")
+
+    # ---------- View Tab ----------
     def _build_view_tab(self):
-        wrap = ctk.CTkFrame(self.tab_view)
-        wrap.pack(fill="both", expand=True, padx=8, pady=8)
+        scroll = _XYScrollFrame(self.view_tab)
+        scroll.pack(fill="both", expand=True, padx=12, pady=8)
+        f = scroll.content
+        ctk.CTkLabel(f, text="View / Search Records", font=self.f_h1).pack(pady=(6,8))
 
-        left = ctk.CTkFrame(wrap)
-        left.pack(side="left", fill="both", expand=True)
+        filter_row = ctk.CTkFrame(f); filter_row.pack(fill="x", padx=12, pady=6)
 
-        cols = ("id", "created_at", "apdn", "e12_seal", "k3_seal")
-        self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
+        ctk.CTkLabel(filter_row, text="Date From:", font=self.f_base).grid(row=0, column=0, padx=6, pady=4, sticky="w")
+        self.v_date_from = ctk.StringVar(); ctk.CTkEntry(filter_row, textvariable=self.v_date_from, width=120, font=self.f_base).grid(row=0, column=1, padx=6)
+        ctk.CTkLabel(filter_row, text="Date To:", font=self.f_base).grid(row=0, column=2, padx=6, pady=4, sticky="w")
+        self.v_date_to = ctk.StringVar(); ctk.CTkEntry(filter_row, textvariable=self.v_date_to, width=120, font=self.f_base).grid(row=0, column=3, padx=6)
+
+        ctk.CTkLabel(filter_row, text="Area:", font=self.f_base).grid(row=1, column=0, padx=6, pady=4, sticky="w")
+        self.v_area = ctk.StringVar()
+        self.v_area_box = ctk.CTkComboBox(filter_row, variable=self.v_area, values=self._load_area_names(), width=180, font=self.f_base)
+        self.v_area_box.grid(row=1, column=1, padx=6)
+        self.v_area.trace_add("write", lambda *_: self._reload_view_places())
+
+        ctk.CTkLabel(filter_row, text="Place:", font=self.f_base).grid(row=1, column=2, padx=6, pady=4, sticky="w")
+        self.v_place = ctk.StringVar()
+        self.v_place_box = ctk.CTkComboBox(filter_row, variable=self.v_place, values=[], width=180, font=self.f_base)
+        self.v_place_box.grid(row=1, column=3, padx=6)
+
+        ctk.CTkLabel(filter_row, text="Trip No:", font=self.f_base).grid(row=2, column=0, padx=6, pady=4, sticky="w")
+        self.v_trip = ctk.StringVar(); ctk.CTkEntry(filter_row, textvariable=self.v_trip, width=180, font=self.f_base).grid(row=2, column=1, padx=6)
+
+        ctk.CTkLabel(filter_row, text="Status:", font=self.f_base).grid(row=2, column=2, padx=6, pady=4, sticky="w")
+        self.v_status = ctk.StringVar()
+        ctk.CTkComboBox(filter_row, values=["", "Complete", "Incomplete"], variable=self.v_status, width=180, font=self.f_base).grid(row=2, column=3, padx=6)
+
+        ctk.CTkButton(filter_row, text="Search", command=self.load_view_records, font=self.f_base).grid(row=0, column=4, padx=10)
+        ctk.CTkButton(filter_row, text="Reset", fg_color="gray80", command=self._reset_view_filters, font=self.f_base).grid(row=1, column=4)
+
+        body = ctk.CTkFrame(f); body.pack(fill="both", expand=True, padx=12, pady=8)
+        body.grid_columnconfigure(0, weight=3); body.grid_columnconfigure(1, weight=2); body.grid_rowconfigure(0, weight=1)
+
+        left_wrap = ctk.CTkFrame(body); left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0,8), pady=0)
+        cols = ("id", "date", "trip", "status")
+        self.tree = ttk.Treeview(left_wrap, columns=cols, show="headings", selectmode="extended")
         for c in cols:
-            self.tree.heading(c, text=c)
-        self.tree.column("id", width=70, anchor="center")
-        self.tree.column("created_at", width=160)
-        self.tree.column("apdn", width=120)
-        self.tree.column("e12_seal", width=110)
-        self.tree.column("k3_seal", width=110)
-        self.tree.pack(fill="both", expand=True)
-        self.tree.bind("<<TreeviewSelect>>", lambda e: self._show_record_details())
+            self.tree.heading(c, text=c.capitalize())
+            width = 260 if c == "trip" else (100 if c == "id" else 140)
+            self.tree.column(c, width=width, anchor="center", stretch=True)
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.tree.tag_configure('incomplete', background='#fff5d6')
+        self.tree.tag_configure('complete', background='#eafff2')
+        vsb = ttk.Scrollbar(left_wrap, orient="vertical", command=self.tree.yview); vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(left_wrap, orient="horizontal", command=self.tree.xview); hsb.pack(side="bottom", fill="x")
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        btns = ctk.CTkFrame(left)
-        btns.pack(fill="x", pady=6)
-        ctk.CTkButton(btns, text="Refresh", command=self.load_view_records).pack(side="left", padx=4)
-        ctk.CTkButton(btns, text="Delete Selected (Multi)", command=self._delete_selected_multi).pack(side="left", padx=4)
+        right = ctk.CTkFrame(body); right.grid(row=0, column=1, sticky="nsew", padx=(8,0), pady=0)
+        right.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(right, text="Record Details", font=self.f_base).grid(row=0, column=0, sticky="w", pady=(0,6))
+        self.detail_text = ctk.CTkTextbox(right, height=520, font=self.f_base, wrap="word"); self.detail_text.grid(row=1, column=0, sticky="nsew")
 
-        # right panel details
-        right = ctk.CTkScrollableFrame(wrap, width=420)
-        right.pack(side="left", fill="y", padx=8)
-        self.detail_panel = right
-        self.detail_widgets: List[tk.Widget] = []
+        btns = ctk.CTkFrame(right); btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
+        ctk.CTkButton(btns, text="Edit Selected", command=self._edit_selected, font=self.f_base).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text="Delete Selected", fg_color="#c63", command=self._delete_selected, font=self.f_base).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text="Delete Selected (Multi)", fg_color="#a33", command=self._delete_selected_multi, font=self.f_base).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text="Export Selected (PDF)", command=self._export_selected_pdf, font=self.f_base).pack(side="right", padx=6)
+        ctk.CTkButton(btns, text="Export All (PDF)", command=self._export_all_pdf, font=self.f_base).pack(side="right", padx=6)
 
+        self.v_area.set(""); self._reload_view_places()
+
+    def _reload_view_places(self):
+        area = self.v_area.get()
+        if not area:
+            self.v_place_box.configure(values=[]); self.v_place.set(""); return
+        DB_CURSOR.execute("SELECT id FROM areas WHERE name = ?", (area,))
+        r = DB_CURSOR.fetchone()
+        if not r:
+            self.v_place_box.configure(values=[]); self.v_place.set(""); return
+        aid = r[0]
+        DB_CURSOR.execute("SELECT code FROM places WHERE area_id = ? ORDER BY code", (aid,))
+        names = [x[0] for x in DB_CURSOR.fetchall()]
+        self.v_place_box.configure(values=names); self.v_place.set(names[0] if names else "")
+
+    def _reset_view_filters(self):
+        self.v_date_from.set(""); self.v_date_to.set(""); self.v_area.set(""); self.v_place.set(""); self.v_trip.set(""); self.v_status.set("")
         self.load_view_records()
 
     def load_view_records(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        for row in self.db.list_records():
-            self.tree.insert('', 'end', iid=str(row["id"]), values=(row["id"], row["created_at"], row["apdn"], row["e12_seal"], row["k3_seal"]))
-        self._clear_detail_panel()
+        try:
+            query = ("SELECT r.id, r.date, r.trip_no, a.name, p.code, r.car_plate, r.status FROM gts_records r "
+                     "LEFT JOIN areas a ON r.area_id=a.id LEFT JOIN places p ON r.place_id=p.id WHERE 1=1")
+            params = []
+            df = self.v_date_from.get().strip(); dt = self.v_date_to.get().strip()
+            if df and dt:
+                query += " AND date BETWEEN ? AND ?"; params.extend([df, dt])
+            elif df:
+                query += " AND date >= ?"; params.append(df)
+            elif dt:
+                query += " AND date <= ?"; params.append(dt)
+            if self.v_area.get().strip():
+                query += " AND a.name = ?"; params.append(self.v_area.get().strip())
+            if self.v_place.get().strip():
+                query += " AND p.code = ?"; params.append(self.v_place.get().strip())
+            if self.v_trip.get().strip():
+                query += " AND r.trip_no LIKE ?"; params.append(f"%{self.v_trip.get().strip()}%")
+            if self.v_status.get().strip():
+                query += " AND r.status = ?"; params.append(self.v_status.get().strip())
+            query += " ORDER BY r.date DESC, r.id DESC LIMIT 100"
+            DB_CURSOR.execute(query, params)
+            rows = DB_CURSOR.fetchall()
+            for i in self.tree.get_children(): self.tree.delete(i)
+            for row in rows:
+                rid, date_s, trip_no, area_name, place_code, car_plate, status = row
+                place_code = place_code or "-"
+                trip_str = f"{place_code}/{trip_no or '-'}{('/' + car_plate) if car_plate else ''}"
+                tag = 'complete' if status == 'Complete' else 'incomplete'
+                self.tree.insert("", "end", iid=str(rid), values=(rid, date_s, trip_str, status), tags=(tag,))
+            self.detail_text.delete("0.0", "end")
+        except Exception:
+            log_exc("load_view_records")
+            messagebox.showerror("Error", "Failed to load records. See log.")
 
-    def _clear_detail_panel(self):
-        for w in getattr(self, 'detail_widgets', []):
-            try: w.destroy()
-            except: pass
-        self.detail_widgets = []
-
-    def _show_record_details(self):
+    def _on_tree_double_click(self, event):
         sel = self.tree.selection()
-        if not sel:
-            return
+        if not sel: return
+        rid = int(sel[0]); self._open_for_edit(rid)
+
+    def _on_tree_select(self, event):
+        sel = self.tree.selection()
+        if not sel: return
         rid = int(sel[0])
-        row = self.db.get_record(rid)
-        if not row:
-            return
-        self._clear_detail_panel()
-        add = self.detail_widgets.append
-        mk = lambda t: ctk.CTkLabel(self.detail_panel, text=t)
-        mk(f"Record #{row['id']}").pack(anchor='w', pady=(2,2)); add(_)
-        ctk.CTkLabel(self.detail_panel, text=f"Created: {row['created_at']}").pack(anchor='w'); add(_)
-        ctk.CTkLabel(self.detail_panel, text=f"APDN: {row['apdn']}").pack(anchor='w'); add(_)
-        ctk.CTkLabel(self.detail_panel, text=f"E12 Seal: {row['e12_seal']}  |  K3 Seal: {row['k3_seal']}").pack(anchor='w'); add(_)
+        try:
+            DB_CURSOR.execute("""
+                SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                       estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
+                FROM gts_records WHERE id = ?
+            """, (rid,))
+            r = DB_CURSOR.fetchone()
+            if not r: return
+            (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
+             estate_s, kilang_s, e_marks_s, k_marks_s,
+             remarks, status, created, updated) = r
 
-        def show_checks(title: str, data: Dict[str, bool]):
-            ctk.CTkLabel(self.detail_panel, text=title).pack(anchor='w', pady=(6,2)); add(_)
-            for k, v in data.items():
-                ctk.CTkLabel(self.detail_panel, text=f"{k}: {PRINT_TRUE if v else PRINT_FALSE}").pack(anchor='w'); add(_)
-        show_checks("Estate checks", json.loads(row['estate_checks'] or '{}'))
-        show_checks("Kilang checks", json.loads(row['kilang_checks'] or '{}'))
+            DB_CURSOR.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+            area_name = (DB_CURSOR.fetchone() or ["-"])[0]
+            DB_CURSOR.execute("SELECT code FROM places WHERE id = ?", (pid,))
+            place_code = (DB_CURSOR.fetchone() or ["-"])[0]
 
-        # images by label
-        ctk.CTkLabel(self.detail_panel, text="Images:").pack(anchor='w', pady=(6,2)); add(_)
-        imgs = self.db.list_images(rid)
-        group: Dict[str, List[str]] = {}
-        for imr in imgs:
-            group.setdefault(imr['label'], []).append(imr['path'])
-        for label, files in group.items():
-            rowf = ctk.CTkFrame(self.detail_panel)
-            rowf.pack(fill='x', pady=2); add(rowf)
-            ctk.CTkLabel(rowf, text=label).pack(side='left', padx=6)
-            holder: List[ImageTk.PhotoImage] = []
-            for p in files:
-                try:
-                    img = Image.open(p).copy(); img.thumbnail(IMG_THUMB_SIZE)
-                    tkimg = ImageTk.PhotoImage(img); holder.append(tkimg)
-                    ctk.CTkLabel(rowf, image=tkimg, text="").pack(side='left', padx=3)
-                except Exception:
-                    ctk.CTkLabel(rowf, text=f"(missing {os.path.basename(p)})").pack(side='left', padx=3)
+            estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
+            e_marks = load_json(e_marks_s);     k_marks = load_json(k_marks_s)
 
-        if (row['notes'] or '').strip():
-            ctk.CTkLabel(self.detail_panel, text="Notes:").pack(anchor='w', pady=(6,2)); add(_)
-            t = tk.Text(self.detail_panel, height=6); t.insert('1.0', row['notes']); t.configure(state='disabled')
-            t.pack(fill='x'); add(t)
+            lines = [
+                f"Date: {date_s}",
+                f"Trip: {place_code}/{trip or '-'}{('/' + car_plate) if car_plate else ''}",
+                f"Area / Place: {area_name} / {place_code}",
+                f"Car Plate: {car_plate or '-'}",
+                f"APDN (E2): {apdn or '-'}",
+                f"Seal E12: {seal_e12 or '-'}    Seal K3: {seal_k3 or '-'}",
+                f"Status: {status}",
+                f"Saved: {created}   Updated: {updated or '-'}",
+                ""
+            ]
+            lines.append("Estate:")
+            for k in REQUIRED_E:
+                lines.append(f"  {k}: {MARK_SYMBOL.get(e_marks.get(k, ''), '')} ({len(estate_data.get(k, []))} files)")
+            lines.append("")
+            lines.append("Kilang:")
+            for k in REQUIRED_K:
+                lines.append(f"  {k}: {MARK_SYMBOL.get(k_marks.get(k, ''), '')} ({len(kilang_data.get(k, []))} files)")
+            lines.append("")
+            lines.append("Remarks:"); lines.append((remarks or "-").strip())
+            self.detail_text.delete("0.0", "end"); self.detail_text.insert("0.0", "\n".join(lines))
+        except Exception:
+            log_exc("_on_tree_select")
+            messagebox.showerror("Error", "Failed to show details. See log.")
+
+    def _edit_selected(self):
+        sel = self.tree.selection()
+        if not sel: messagebox.showinfo("Select", "Please select a record to edit."); return
+        rid = int(sel[0]); self._open_for_edit(rid)
+
+    def _open_for_edit(self, rid):
+        try:
+            DB_CURSOR.execute("""
+                SELECT id, date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                       estate_pics, kilang_pics, estate_marks, kilang_marks, remarks
+                FROM gts_records WHERE id = ?
+            """, (rid,))
+            row = DB_CURSOR.fetchone()
+            if not row: messagebox.showerror("Not found", "Record not found."); return
+            (_id, date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
+             estate_s, kilang_s, e_marks_s, k_marks_s, remarks) = row
+
+            self.editing_id = rid
+            self.cr_date.set(date_s or datetime.date.today().isoformat())
+            self.cr_trip.set(trip or ""); self.cr_apdn_e2.set(apdn or "")
+            self.cr_car_plate.set(car_plate or ""); self.cr_seal_e12.set(seal_e12 or ""); self.cr_seal_k3.set(seal_k3 or "")
+
+            DB_CURSOR.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+            area_name = (DB_CURSOR.fetchone() or [""])[0]
+            self.cr_area_box.configure(values=self._load_area_names())
+            self.cr_area_var.set(area_name); self._reload_places_box()
+            DB_CURSOR.execute("SELECT code FROM places WHERE id = ?", (pid,))
+            self.cr_place_var.set((DB_CURSOR.fetchone() or [""])[0])
+
+            self.cr_remarks.delete("0.0", "end"); self.cr_remarks.insert("0.0", remarks or "")
+
+            e_marks = load_json(e_marks_s); k_marks = load_json(k_marks_s)
+            for k in REQUIRED_E: self.estate_marks[k].set(e_marks.get(k, ""))
+            for k in REQUIRED_K: self.kilang_marks[k].set(k_marks.get(k, ""))
+
+            estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
+            for k in REQUIRED_E:
+                self.estate_files[k]["paths"] = list(estate_data.get(k, []))[:2]
+                self.estate_files[k]["count_widget"].configure(text=f"{len(self.estate_files[k]['paths'])} files")
+            for k in REQUIRED_K:
+                self.kilang_files[k]["paths"] = list(kilang_data.get(k, []))[:2]
+                self.kilang_files[k]["count_widget"].configure(text=f"{len(self.kilang_files[k]['paths'])} files")
+
+            self.tabview.set("Create Record"); self._update_save_warning()
+        except Exception:
+            log_exc("_open_for_edit")
+            messagebox.showerror("Error", "Failed to open record for edit. See log.")
+
+    def _delete_selected(self):
+        sel = self.tree.selection()
+        if not sel: messagebox.showinfo("Select", "Please select a record to delete."); return
+        rid = int(sel[0])
+        if not messagebox.askyesno("Confirm", f"Delete record {rid}? This cannot be undone."): return
+        try:
+            DB_CURSOR.execute("DELETE FROM gts_records WHERE id = ?", (rid,))
+            DB_CONN.commit(); self.load_view_records(); messagebox.showinfo("Deleted", "Record deleted.")
+        except Exception:
+            log_exc("_delete_selected"); messagebox.showerror("Error", "Failed to delete record. See log.")
 
     def _delete_selected_multi(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo(APP_NAME, "Select one or more records to delete.")
+            messagebox.showinfo("Select", "Please select one or more records to delete.")
             return
         ids = [int(i) for i in sel]
-        if not messagebox.askyesno(APP_NAME, f"Delete {len(ids)} record(s)? This cannot be undone."):
+        if not messagebox.askyesno("Confirm", f"Delete {len(ids)} record(s)? This cannot be undone."):
             return
         try:
-            self.db.delete_records(ids)
+            placeholders = ",".join("?" * len(ids))
+            DB_CURSOR.execute(f"DELETE FROM gts_records WHERE id IN ({placeholders})", ids)
+            DB_CONN.commit()
             self.load_view_records()
-            messagebox.showinfo(APP_NAME, f"Deleted {len(ids)} record(s)")
-        except Exception as e:
-            messagebox.showerror(APP_NAME, f"Failed to delete: {e}")
+            messagebox.showinfo("Deleted", f"Deleted {len(ids)} record(s).")
+        except Exception:
+            log_exc("_delete_selected_multi")
+            messagebox.showerror("Error", "Failed to delete selected records. See log.")
 
-    # ---------- Export Tab ----------
-    def _build_export_tab(self):
-        wrap = ctk.CTkFrame(self.tab_export)
-        wrap.pack(fill="both", expand=True, padx=10, pady=10)
-        ctk.CTkLabel(wrap, text="Export all records to PDF").pack(anchor='w')
-        ctk.CTkButton(wrap, text="Export to PDF", command=self._export_pdf).pack(anchor='w', pady=8)
-        self.lbl_export_status = ctk.CTkLabel(wrap, text="")
-        self.lbl_export_status.pack(anchor='w', pady=4)
+    def _fetch_records(self, where="", params=(), limit=None):
+        cols = ["id","date","trip_no","area_id","place_id","apdn_no","e12_seal","k3_seal","car_plate",
+                "estate_pics","kilang_pics","estate_marks","kilang_marks","remarks","status","created_at","updated_at"]
+        sql = f"SELECT {', '.join(cols)} FROM gts_records"
+        if where: sql += " WHERE " + where
+        sql += " ORDER BY date DESC, id DESC"
+        if limit: sql += f" LIMIT {int(limit)}"
+        DB_CURSOR.execute(sql, params)
+        return [dict(zip(cols, r)) for r in DB_CURSOR.fetchall()]
 
-    def _export_pdf(self):
-        out = filedialog.asksaveasfilename(title="Save PDF", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
-        if not out:
-            return
+    # ---------- PDF Export ----------
+    def _ensure_reportlab(self) -> bool:
+        if REPORTLAB_AVAILABLE:
+            return True
+        messagebox.showerror("Missing dependency", "PDF export requires reportlab.\nInstall with: pip install reportlab")
+        return False
+
+    def _estimate_block_height(self, rec, w, h, margin):
+        rows = max(len(REQUIRED_E), len(REQUIRED_K))
+        header_h = 18 * mm
+        subheader_h = 10 * mm
+        row_h = 14 * mm
+        remarks = (rec.get("remarks") or "").strip()
+        lines = max(1, min(6, (len(remarks)//120)+1))
+        remarks_h = (6 + lines*5) * mm
+        return header_h + subheader_h + rows*row_h + remarks_h + 6*mm
+
+    def _draw_record_block(self, c, rec, x, y_top, width):
+        DB_CURSOR.execute("SELECT name FROM areas WHERE id = ?", (rec["area_id"],))
+        area_name = (DB_CURSOR.fetchone() or [""])[0]
+        DB_CURSOR.execute("SELECT code FROM places WHERE id = ?", (rec["place_id"],))
+        place_code = (DB_CURSOR.fetchone() or [""])[0]
+
+        estate_data = load_json(rec["estate_pics"]); kilang_data = load_json(rec["kilang_pics"])
+        e_marks = load_json(rec["estate_marks"]);     k_marks = load_json(rec["kilang_marks"])
+
+        w = width
+        h_header = 18 * mm
+        h_sub = 10 * mm
+        row_h = 14 * mm
+        col_gap = 6 * mm
+        inner_pad = 3 * mm
+        col_w = (w - col_gap) / 2.0
+        y = y_top
+
+        c.setFont("Helvetica-Bold", 13)
+        trip_str = f"{place_code}/{rec.get('trip_no') or '-'}{('/' + rec.get('car_plate')) if rec.get('car_plate') else ''}"
+        c.drawString(x, y, f"Date: {rec['date']}    Trip: {trip_str}    Status: {rec['status']}")
+        y -= 7 * mm
+        c.setFont("Helvetica", 10)
+        c.drawString(x, y, f"Area: {area_name}/{place_code}    APDN (E2): {rec.get('apdn_no') or '-'}    "
+                           f"Seal E12: {rec.get('e12_seal') or '-'}    Seal K3: {rec.get('k3_seal') or '-'}    "
+                           f"Car Plate: {rec.get('car_plate') or '-'}")
+        y -= (h_header - 7*mm)
+
+        c.setFont("Helvetica-Bold", 11); c.drawString(x, y, "ESTATE")
+        c.setFont("Helvetica-Bold", 11); c.drawString(x + col_w + col_gap, y, "KILANG")
+        y -= h_sub
+
+        def draw_label_col(base_x, keys, marks_map, pics_map, ystart):
+            yy = ystart
+            thumb_w = 26 * mm
+            thumb_h = 18 * mm
+            for k in keys:
+                c.setFont("Helvetica", 10)
+                c.drawString(base_x, yy, f"{k} : {MARK_SYMBOL.get(marks_map.get(k,''), '')}")
+                imgs = list(pics_map.get(k, []))[:2]
+                ix = base_x + 28 * mm
+                for i, fpath in enumerate(imgs):
+                    try:
+                        if PIL_AVAILABLE and os.path.exists(fpath):
+                            img = Image.open(fpath); img.thumbnail((int(thumb_w), int(thumb_h)))
+                            tmp = os.path.join(APP_DIR, f"tmp_{os.path.basename(fpath)}_{i}.jpg")
+                            img.convert("RGB").save(tmp, format="JPEG")
+                            c.drawImage(tmp, ix, yy - thumb_h + 2, width=thumb_w, height=thumb_h,
+                                        preserveAspectRatio=True, anchor='sw')
+                            try: os.remove(tmp)
+                            except: pass
+                        else:
+                            c.setFont("Helvetica", 8); c.drawString(ix, yy-4, os.path.basename(fpath))
+                    except Exception:
+                        pass
+                    ix += thumb_w + 2*mm
+                yy -= row_h
+            return yy
+
+        y_after_estate = draw_label_col(x + inner_pad, REQUIRED_E, e_marks, estate_data, y)
+        y_after_kilang = draw_label_col(x + col_w + col_gap + inner_pad, REQUIRED_K, k_marks, kilang_data, y)
+        y = min(y_after_estate, y_after_kilang) - 4*mm
+
+        c.setFont("Helvetica-Bold", 11); c.drawString(x, y, "Remarks:"); y -= 4*mm
+        c.setFont("Helvetica", 10)
+        remarks = (rec.get("remarks") or "-").strip()
+        for ln in textwrap.wrap(remarks, width=140)[:10]:
+            c.drawString(x, y, ln); y -= 5 * mm
+        c.setFont("Helvetica", 8)
+        c.drawRightString(x + w, y + 4*mm, f"Saved: {rec.get('created_at')}   Updated: {rec.get('updated_at') or '-'}")
+        return y - 4*mm
+
+    def _render_pdf(self, records, out_path):
+        if not self._ensure_reportlab(): return False
         try:
-            self._do_render_pdf(out)
-            self.lbl_export_status.configure(text=f"Exported: {out}")
-            messagebox.showinfo(APP_NAME, f"PDF exported to {out}")
-        except Exception as e:
-            messagebox.showerror(APP_NAME, f"Export failed: {e}")
+            page_w, page_h = A4
+            margin = 12 * mm
+            c = canvas.Canvas(out_path, pagesize=A4)
+            y = page_h - margin
+            x = margin
+            width = page_w - 2*margin
 
-    def _do_render_pdf(self, outpath: str):
-        rows = self.db.list_records()
-        c = canvas.Canvas(outpath, pagesize=A4)
-        W, H = A4
-        margin = 15*mm
-        y = H - margin
-        line_h = 6*mm
-        img_max_w = W - 2*margin - 20
-        img_row_h = 35*mm
+            for idx, rec in enumerate(records):
+                need = self._estimate_block_height(rec, page_w, page_h, margin)
+                if y - need < margin:
+                    c.showPage()
+                    y = page_h - margin
+                y = self._draw_record_block(c, rec, x, y, width)
+                y -= 6 * mm  # gap between records
+            c.save()
+            return True
+        except Exception:
+            log_exc("_render_pdf")
+            messagebox.showerror("Error", "Failed to create PDF. See log.")
+            return False
 
-        def new_page():
-            nonlocal y
-            c.showPage()
-            y = H - margin
+    def _export_selected_pdf(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select one or more records first.")
+            return
+        ids = [int(i) for i in sel]
+        where = f"id IN ({','.join(['?']*len(ids))})"
+        recs = self._fetch_records(where, tuple(ids))
+        if not recs:
+            messagebox.showinfo("Empty", "No records to export.")
+            return
+        out = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                           filetypes=[("PDF","*.pdf")],
+                                           title="Save PDF as",
+                                           initialfile=f"GTS_export_{datetime.date.today().isoformat()}.pdf")
+        if not out: return
+        if self._render_pdf(recs, out):
+            messagebox.showinfo("Done", f"PDF saved:\n{out}")
 
-        def ensure_space(need: float):
-            nonlocal y
-            if y - need < margin:
-                new_page()
+    def _export_all_pdf(self):
+        recs = self._fetch_records()
+        if not recs:
+            messagebox.showinfo("Empty", "No records to export.")
+            return
+        out = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                           filetypes=[("PDF","*.pdf")],
+                                           title="Save PDF as",
+                                           initialfile=f"GTS_all_{datetime.date.today().isoformat()}.pdf")
+        if not out: return
+        if self._render_pdf(recs, out):
+            messagebox.showinfo("Done", f"PDF saved:\n{out}")
 
-        for row in rows:
-            # Header block height estimate ~ 6 lines
-            header_need = line_h * 6
-            ensure_space(header_need)
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(margin, y, f"Record #{row['id']} — {row['created_at']}"); y -= line_h
-            c.setFont("Helvetica", 10)
-            c.drawString(margin, y, f"APDN: {row['apdn']}"); y -= line_h
-            c.drawString(margin, y, f"E12 Seal: {row['e12_seal']}   K3 Seal: {row['k3_seal']}"); y -= line_h
-
-            est = json.loads(row['estate_checks'] or '{}')
-            kil = json.loads(row['kilang_checks'] or '{}')
-            c.drawString(margin, y, "Estate checks:"); y -= line_h
-            for k in est:
-                c.drawString(margin+12, y, f"{k}: {PRINT_TRUE if est[k] else PRINT_FALSE}"); y -= line_h
-            c.drawString(margin, y, "Kilang checks:"); y -= line_h
-            for k in kil:
-                c.drawString(margin+12, y, f"{k}: {PRINT_TRUE if kil[k] else PRINT_FALSE}"); y -= line_h
-
-            # Notes
-            notes = (row['notes'] or '').strip()
-            if notes:
-                ensure_space(line_h*2)
-                c.setFont("Helvetica-Bold", 10)
-                c.drawString(margin, y, "Notes:"); y -= line_h
-                c.setFont("Helvetica", 10)
-                # simple wrapping
-                for line in wrap_text(notes, max_chars=95):
-                    ensure_space(line_h)
-                    c.drawString(margin+12, y, line); y -= line_h
-
-            # Images grouped by label
-            imgs = self.db.list_images(row['id'])
-            groups: Dict[str, List[str]] = {}
-            for imr in imgs:
-                groups.setdefault(imr['label'], []).append(imr['path'])
-            if groups:
-                ensure_space(line_h)
-                c.setFont("Helvetica-Bold", 10)
-                c.drawString(margin, y, "Images:"); y -= line_h
-                c.setFont("Helvetica", 10)
-                for label, files in groups.items():
-                    ensure_space(line_h)
-                    c.drawString(margin+0, y, f"{label}:"); y -= line_h
-                    # layout images for this label in a row if possible
-                    if not files:
-                        continue
-                    # compute per-image width (max two per row since cap=2)
-                    row_y = y
-                    x = margin+12
-                    for p in files:
-                        try:
-                            img = Image.open(p)
-                            w, h = img.size
-                            scale = min(img_max_w/2 / w, img_row_h / h)
-                            tw, th = w*scale, h*scale
-                            ensure_space(th + line_h)
-                            c.drawImage(ImageReader(img), x, y - th, width=tw, height=th, preserveAspectRatio=True, anchor='sw')
-                            x += tw + 10
-                            row_y = min(row_y, y - th)
-                        except Exception:
-                            ensure_space(line_h)
-                            c.drawString(margin+12, y, f"(missing {os.path.basename(p)})"); y -= line_h
-                    y = row_y - 8
-
-            # Spacer between records; try to keep 2 per page when possible
-            ensure_space(line_h*2)
-            y -= line_h
-
-        c.save()
-
-
-def wrap_text(text: str, max_chars: int = 90) -> List[str]:
-    words = text.split()
-    lines: List[str] = []
-    cur = []
-    n = 0
-    for w in words:
-        if n + len(w) + (1 if cur else 0) > max_chars:
-            lines.append(" ".join(cur)); cur = [w]; n = len(w)
+    # ---------- misc helpers ----------
+    def _update_save_warning(self):
+        missing = [k for k in REQUIRED_E if self.estate_marks[k].get() == ""]
+        missing += [k for k in REQUIRED_K if self.kilang_marks[k].get() == ""]
+        if missing:
+            self.save_warning_label.configure(text=f"Missing {len(missing)} marks — saved records will be Incomplete.")
         else:
-            cur.append(w); n += len(w) + (1 if cur[:-1] else 0)
-    if cur:
-        lines.append(" ".join(cur))
-    return lines
+            self.save_warning_label.configure(text="All labels filled. Saving will compute status accordingly.")
 
+# ---------- startup license/login guard ----------
+def _startup_login_guard(max_attempts: int = 5) -> bool:
+    """
+    Verify signed license and prompt for PIN before showing the main UI.
+    Returns True if unlocked, False otherwise.
+    """
+    if not CRYPTO_AVAILABLE:
+        messagebox.showerror("Missing dependency", "License check requires cryptography.\nInstall with: pip install cryptography")
+        return False
+    try:
+        cfg = _load_license()
+        if not cfg:
+            messagebox.showerror("License missing", "license.json not found. Contact SED admin.")
+            return False
+        payload = cfg.get("payload", {})
+        sig = cfg.get("signature", "")
+        if not os.path.exists(PUBKEY_PATH):
+            messagebox.showerror("Public key missing", "public_key.pem not found. Contact SED admin.")
+            return False
+        if not _verify_license_signature(payload, sig):
+            messagebox.showerror("Invalid license", "Signature verification failed.")
+            return False
 
-def main():
-    # Licensing check FIRST (UI safe because we may ask for PIN)
-    verify_license_or_exit()
+        # Optional binding
+        if payload.get("bind_hostname"):
+            import socket
+            current_host = socket.gethostname()
+            if payload.get("hostname") != current_host:
+                messagebox.showerror("License rejected", f"License bound to {payload.get('hostname')}, not {current_host}.")
+                return False
+        if payload.get("expires_at"):
+            try:
+                exp = datetime.datetime.fromisoformat(payload["expires_at"].replace("Z",""))
+                if datetime.datetime.utcnow() > exp:
+                    messagebox.showerror("License expired", f"License expired on {payload['expires_at']}.")
+                    return False
+            except Exception:
+                pass
 
-    # DB init
-    db = DB(DB_PATH)
+        root = tk.Tk(); root.withdraw()
+        def _destroy_root():
+            try: root.destroy()
+            except Exception: pass
 
-    # Launch UI
-    app = GTSApp(db)
-    app.mainloop()
+        tries = 0
+        while tries < max_attempts:
+            pin = simpledialog.askstring("GTS Login", f"Enter Admin PIN ({max_attempts-tries} tries left):", show="*", parent=root)
+            if pin is None:
+                _destroy_root(); return False
+            expected = payload.get("admin_pin_hash"); salt = payload.get("admin_pin_salt")
+            if expected and salt and _hash_pin(pin, salt) == expected:
+                _destroy_root(); return True
+            tries += 1
+            messagebox.showerror("Incorrect PIN", "PIN is incorrect.", parent=root)
+        messagebox.showerror("Locked", "Too many failed attempts. Exiting.", parent=root)
+        _destroy_root(); return False
+    except Exception:
+        log_exc("_startup_login_guard")
+        try:
+            root
+        except NameError:
+            root = None
+        if root:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        return False
 
-
+# ---------- run ----------
 if __name__ == "__main__":
-    main()
+    try:
+        if not _startup_login_guard(max_attempts=5):
+            raise SystemExit(1)
+        app = GTSApp()
+        app.mainloop()
+    except SystemExit:
+        pass
+    except Exception:
+        log_exc("Fatal error running app")
+        raise
