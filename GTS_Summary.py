@@ -360,10 +360,33 @@ class _XYScrollFrame(ctk.CTkFrame):
             self._canvas.yview_scroll(1, "units")
 
     def _bind_mousewheel(self, widget):
-        widget.bind_all("<MouseWheel>", self._on_mousewheel, add="+")        # Windows / most
-        widget.bind_all("<Shift-MouseWheel>", self._on_mousewheel, add="+")
-        widget.bind_all("<Button-4>", self._on_mousewheel_linux, add="+")    # Linux
-        widget.bind_all("<Button-5>", self._on_mousewheel_linux, add="+")
+
+        # Bind mouse-wheel on specific widgets (CTk forbids bind_all)
+        try:
+            targets = {widget}
+            try:
+                targets.add(self._canvas)
+            except Exception:
+                pass
+            try:
+                targets.add(self.content)
+            except Exception:
+                pass
+            try:
+                targets.add(self.winfo_toplevel())
+            except Exception:
+                pass
+            for t in list(targets):
+                try:
+                    t.bind("<MouseWheel>", self._on_mousewheel, add="+")         # Windows/macOS
+                    t.bind("<Shift-MouseWheel>", self._on_mousewheel, add="+")
+                    t.bind("<Button-4>", self._on_mousewheel_linux, add="+")     # Linux
+                    t.bind("<Button-5>", self._on_mousewheel_linux, add="+")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
 # ---------------- UI (Light + Roboto) ----------------
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
