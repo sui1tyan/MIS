@@ -517,17 +517,6 @@ class GTSApp(ctk.CTk):
 
         # When Area changes, reload places
         self.cr_area_var.trace_add("write", lambda *a: self._reload_places_box())
-        # Section: Estate labels
-        ctk.CTkLabel(f, text="Estate (E2–E6, E12–E16)", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
-        self.estate_files = {}
-        self.estate_marks = {}
-        self._build_mark_attach_grid(f, REQUIRED_E, self.estate_files, self.estate_marks)
-
-        # Section: Kilang labels
-        ctk.CTkLabel(f, text="Kilang (K1, K3–K7)", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
-        self.kilang_files = {}
-        self.kilang_marks = {}
-        self._build_mark_attach_grid(f, REQUIRED_K, self.kilang_files, self.kilang_marks)
         btn_row = ctk.CTkFrame(f)
         btn_row.pack(fill="x", padx=12, pady=10)
         ctk.CTkButton(
@@ -547,9 +536,35 @@ class GTSApp(ctk.CTk):
 
         self.save_warning_label = ctk.CTkLabel(btn_row, text="", font=self.f_base)
         self.save_warning_label.pack(side="right", padx=12)
-        ctk.CTkLabel(f, text="Remarks", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
-        self.cr_remarks = ctk.CTkTextbox(f, height=100, font=self.f_base, wrap="word")
-        self.cr_remarks.pack(fill="x", padx=12)
+        # --- Estate + Kilang side-by-side ---
+        two_col = ctk.CTkFrame(f)
+        two_col.pack(fill="both", expand=True, padx=12, pady=(8, 6))
+
+        left_col = ctk.CTkFrame(two_col)
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        right_col = ctk.CTkFrame(two_col)
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        two_col.grid_columnconfigure(0, weight=1)
+        two_col.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(left_col, text="Estate (E2–E6, E12–E16)", font=self.f_bold).pack(anchor="w", padx=8, pady=(2, 4))
+        self.estate_files = {}; self.estate_marks = {} 
+        self._build_mark_attach_grid(left_col, REQUIRED_E, self.estate_files, self.estate_marks)
+
+        ctk.CTkLabel(right_col, text="Kilang (K1, K3–K7)", font=self.f_bold).pack(anchor="w", padx=8, pady=(2, 4))
+        self.kilang_files = {}; self.kilang_marks = {} 
+        self._build_mark_attach_grid(right_col, REQUIRED_K, self.kilang_files, self.kilang_marks)
+
+        # Remarks under Kilang (modest height)
+        ctk.CTkLabel(right_col, text="Remarks", font=self.f_bold).pack(anchor="w", padx=8, pady=(8, 2))
+        self.cr_remarks = ctk.CTkTextbox(right_col, height=100, font=self.f_base, wrap="word")
+        self.cr_remarks.pack(fill="x", padx=8, pady=(0, 6))
+
+        # Label legend at the bottom (full width, wraps)
+        legend_box = ctk.CTkFrame(f)
+        legend_box.pack(fill="x", padx=12, pady=(6, 8))
+        ctk.CTkLabel(legend_box, text="E2- Ramp ass & APDN; E3 - Timbangan lori tanpa muatan; E4- Pandangan belakang lori; E5- Sisi kiri lori; E6- Sisi kanan lori; E12- Selfie dengan seal; E13- Timbangan lori ada muatan; E14- Pandangan atas lori; E15- Selfie di hadapan lori; E16- Senarai semak yang lengkap di estate K1- Selfie dengan tangki air kosong; K3- Perbandingan seal; K4- Pandangan belakang lori; K5- Sisi kanan lori; K6- Sisi kiri lori; K7- Senarai semak yang lengkap di kilang.", font=self.f_base, wraplength=1200, justify="left").pack(anchor="w", padx=8, pady=4)
+
 
 
 
