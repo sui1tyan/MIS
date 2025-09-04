@@ -1,4 +1,4 @@
-# GTS_Summary_regen.py
+# GTS_Summary.py
 """
 GTS SED Desktop App — Regenerated (PDF layout + image limits + car plate + UI tweaks)
 2025-08-28 update:
