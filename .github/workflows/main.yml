@@ -1,0 +1,39 @@
+name: Build GTS Apps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "GTS_Summary v3.py"
+      - "GTS_LG_GUI.py"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller customtkinter pillow reportlab cryptography
+      - name: Build Summary
+        run: |
+          pyinstaller --onedir --windowed --name GTS_Summary "GTS_Summary v3.py"
+      - name: Build License GUI
+        run: |
+          pyinstaller --onedir --windowed --name GTS_LG_Provisioner "GTS_LG_GUI.py"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GTS_Apps_${{ matrix.os }}
+          path: |
+            dist/GTS_Summary
+            dist/GTS_LG_Provisioner
