@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "GTS_Summary v3.py"
+      - "GTS_Summary.py"
       - "GTS_LG_GUI.py"
       - ".github/workflows/build.yml"
 
@@ -26,7 +26,7 @@ jobs:
           pip install pyinstaller customtkinter pillow reportlab cryptography
       - name: Build Summary
         run: |
-          pyinstaller --onedir --windowed --name GTS_Summary "GTS_Summary v3.py"
+          pyinstaller --onedir --windowed --name GTS_Summary "GTS_Summary.py"
       - name: Build License GUI
         run: |
           pyinstaller --onedir --windowed --name GTS_LG_Provisioner "GTS_LG_GUI.py"
