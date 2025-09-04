@@ -357,11 +357,7 @@ class GTSApp(ctk.CTk):
         self.date_entry.grid(row=0, column=1, padx=6)
         self.date_entry.bind("<FocusIn>",  lambda e: self._ensure_date_default())
         self.date_entry.bind("<FocusOut>", lambda e: self._validate_or_default_date())
-        self.after(0, lambda: (
-        self._ensure_date_default(),
-        self.date_entry.delete(0, "end"),
-        self.date_entry.insert(0, self.cr_date.get())
-    ))
+        self.after(0, self._ensure_date_default)
 
         ctk.CTkLabel(top, text="Trip No:", font=self.f_base).grid(row=0, column=2, padx=6, pady=6, sticky="w")
         self.cr_trip = ctk.StringVar()
@@ -516,8 +512,6 @@ class GTSApp(ctk.CTk):
     def _clear_create_form(self):
         self.editing_id = None
         self.cr_date.set(datetime.date.today().isoformat())
-        self.date_entry.delete(0, "end")
-        self.date_entry.insert(0, self.cr_date.get())
         self.cr_trip.set("")
         self.cr_apdn_e2.set("")
         self.cr_car_plate.set("")
