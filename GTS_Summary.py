@@ -357,6 +357,11 @@ class GTSApp(ctk.CTk):
         self.date_entry.grid(row=0, column=1, padx=6)
         self.date_entry.bind("<FocusIn>",  lambda e: self._ensure_date_default())
         self.date_entry.bind("<FocusOut>", lambda e: self._validate_or_default_date())
+        self.after(0, lambda: (
+        self._ensure_date_default(),
+        self.date_entry.delete(0, "end"),
+        self.date_entry.insert(0, self.cr_date.get())
+    ))
 
         ctk.CTkLabel(top, text="Trip No:", font=self.f_base).grid(row=0, column=2, padx=6, pady=6, sticky="w")
         self.cr_trip = ctk.StringVar()
@@ -511,6 +516,8 @@ class GTSApp(ctk.CTk):
     def _clear_create_form(self):
         self.editing_id = None
         self.cr_date.set(datetime.date.today().isoformat())
+        self.date_entry.delete(0, "end")
+        self.date_entry.insert(0, self.cr_date.get())
         self.cr_trip.set("")
         self.cr_apdn_e2.set("")
         self.cr_car_plate.set("")
@@ -906,7 +913,12 @@ class GTSApp(ctk.CTk):
             for i, row in enumerate(rows):
                 rid, date_s, trip_no, area_name, place_code, car_plate, status = row
                 place_code = place_code or "-"
-                trip_str = f"{place_code}/{trip_no or '-'}{('/' + car_plate) if car_plate else ''}"
+                trip_no_txt    = (trip_no or "").strip()
+                car_plate_txt  = (car_plate or "").strip()
+                trip_str = place_code or "-"
+                trip_str += f"/{trip_no_txt if trip_no_txt else '-'}"
+                if car_plate_txt:
+                    trip_str += f"/{car_plate_txt}"
                 tag = 'complete' if status == 'Complete' else 'incomplete'
                 self.tree.insert("", "end", iid=str(rid),
                                  values=(rid, date_s, trip_str, status), tags=(tag,))
