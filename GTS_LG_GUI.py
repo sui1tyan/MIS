@@ -109,11 +109,19 @@ class XYScrollFrame(ctk.CTkFrame):
         elif e.num == 5:
             self.canvas.yview_scroll(1, "units")
 
+    
     def _bind_mouse(self, widget):
-        widget.bind_all("<MouseWheel>", self._wheel, add="+")
-        widget.bind_all("<Shift-MouseWheel>", self._wheel, add="+")
-        widget.bind_all("<Button-4>", self._wheel_linux, add="+")
-        widget.bind_all("<Button-5>", self._wheel_linux, add="+")
+        """Bind mouse/trackpad events without using bind_all (CTk forbids it)."""
+        targets = {widget, self.canvas, self.content, self.winfo_toplevel()}
+        for t in list(targets):
+            try:
+                t.bind("<MouseWheel>", self._wheel, add="+")            # Windows/macOS
+                t.bind("<Shift-MouseWheel>", self._wheel, add="+")
+                t.bind("<Button-4>", self._wheel_linux, add="+")        # Linux
+                t.bind("<Button-5>", self._wheel_linux, add="+")
+            except Exception:
+                pass
+
 
 # ------------- GUI -------------
 class GTSLGApp(ctk.CTk):
