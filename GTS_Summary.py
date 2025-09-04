@@ -1,20 +1,3 @@
-# GTS_Summary.py
-"""
-GTS SED Desktop App — Summary (Patched per user requests)
-- Double scrollbars (horizontal + vertical) on Create and View pages
-- Estate & Kilang stay side-by-side; Remarks placed under Kilang (modest size)
-- Bottom legend text (label descriptions) on Create page
-- Remove ALL export features (PDF/CSV/Excel) and related imports
-- Left-align all text in the left table on View page
-- Each record's images saved into its own folder under images/: PLACE/TRIP/CARPLATE DATE
-- All app data (db, images, log, license) sits beside the main app (script or frozen EXE)
-- License check with Ed25519; Admin PIN login on startup
-
-Dependencies:
-  pip install customtkinter cryptography
-(Optional) Pillow only if you plan to add image previews later.
-"""
-
 import os
 import sys
 import json
@@ -24,16 +7,15 @@ import logging
 import traceback
 import shutil
 import hashlib
-import secrets
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 
-# ---- Ed25519 public key verification ----
+# ---- Ed25519 verification ----
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-# ---- CustomTkinter UI ----
+# ---- CustomTkinter ----
 try:
     import customtkinter as ctk
 except Exception as e:
@@ -49,9 +31,9 @@ os.makedirs(APP_DIR, exist_ok=True)
 IMG_STORE = os.path.join(APP_DIR, "images"); os.makedirs(IMG_STORE, exist_ok=True)
 LOG_PATH = os.path.join(APP_DIR, "gts_app.log")
 DB_PATH = os.path.join(APP_DIR, "gts_records.db")
-SETTINGS_PATH  = os.path.join(APP_DIR, "settings.json")   # non-sensitive app prefs
-LICENSE_PATH   = os.path.join(APP_DIR, "license.json")    # signed license (payload + signature)
-PUBKEY_PATH    = os.path.join(APP_DIR, "public_key.pem")  # Ed25519 public key
+SETTINGS_PATH  = os.path.join(APP_DIR, "settings.json")
+LICENSE_PATH   = os.path.join(APP_DIR, "license.json")
+PUBKEY_PATH    = os.path.join(APP_DIR, "public_key.pem")
 
 # ---------------- logging ----------------
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
@@ -70,7 +52,7 @@ DEFAULT_AREAS = {
     "Serudong Group": ["WM1", "WM2", "WM3", "BKS1", "BKS2", "BKS3"],
     "Sungai Mas": ["SGM", "SGK"],
     "Bergosong": ["BE"],
-    "Kokorotus": ["KRT"]
+    "Kokorotus": ["KRT"],
 }
 
 # ---------------- database ----------------
@@ -124,7 +106,6 @@ def ensure_db_schema():
                 FOREIGN KEY(place_id) REFERENCES places(id)
             )
         """)
-        # migrate
         if not _table_has_column(cur, "gts_records", "car_plate"):
             cur.execute("ALTER TABLE gts_records ADD COLUMN car_plate TEXT")
 
@@ -162,13 +143,6 @@ def _load_settings():
     except Exception:
         log_exc("load_settings")
     return {}
-
-def _save_settings(d):
-    try:
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-    except Exception:
-        log_exc("save_settings")
 
 def _load_license():
     try:
@@ -223,10 +197,6 @@ def load_json(s):
         return {}
 
 def copy_images_to_store(paths, label, dest_dir):
-    """
-    Copy images into dest_dir (under images/) if they are outside; keep original if already inside.
-    Returns list of saved full paths (deduped). Caller enforces per-label limit (2).
-    """
     os.makedirs(dest_dir, exist_ok=True)
     saved = []
     for idx, p in enumerate(paths or []):
@@ -268,7 +238,7 @@ ctk.set_default_color_theme("blue")
 def roboto(size=12, weight="normal"):
     return ctk.CTkFont(family="Roboto", size=size, weight=weight)
 
-# -------- DoubleScrollableFrame (horizontal + vertical) --------
+# -------- DoubleScrollableFrame --------
 class DoubleScrollableFrame(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -289,7 +259,6 @@ class DoubleScrollableFrame(ctk.CTkFrame):
         self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=max(e.width, self.inner.winfo_reqwidth())))
 
-        # Mouse wheel support (Shift+wheel = horizontal)
         self.canvas.bind_all("<MouseWheel>", self._on_wheel)
         self.canvas.bind_all("<Shift-MouseWheel>", self._on_shift_wheel)
 
@@ -308,16 +277,14 @@ class GTSApp(ctk.CTk):
         self.minsize(920, 600)
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
-        self.after(100, lambda: self.state('zoomed'))  # maximize on Windows if available
+        self.after(100, lambda: self.state('zoomed'))
 
         self.editing_id = None
 
-        # Fonts
         self.f_base = roboto(12)
         self.f_bold = roboto(12, "bold")
         self.f_h1   = roboto(16, "bold")
 
-        # ttk style (left-align headings and cells)
         style = ttk.Style(self)
         style.configure("Treeview", font=("Roboto", 11), rowheight=26)
         style.configure("Treeview.Heading", font=("Roboto", 12, "bold"), anchor="w")
@@ -327,7 +294,6 @@ class GTSApp(ctk.CTk):
         except Exception:
             pass
 
-        # Tabs
         self.tabview = ctk.CTkTabview(self, width=1200, height=820)
         self.tabview.pack(padx=12, pady=12, fill="both", expand=True)
         self.tabview.add("Create Record")
@@ -350,6 +316,7 @@ class GTSApp(ctk.CTk):
         top = ctk.CTkFrame(f)
         top.pack(fill="x", padx=12, pady=4)
 
+        # Date
         ctk.CTkLabel(top, text="Date (YYYY-MM-DD):", font=self.f_base).grid(row=0, column=0, padx=6, pady=6, sticky="w")
         self.cr_date = tk.StringVar()
         self.cr_date.set(datetime.date.today().isoformat())
@@ -357,20 +324,25 @@ class GTSApp(ctk.CTk):
         self.date_entry.grid(row=0, column=1, padx=6)
         self.date_entry.bind("<FocusIn>",  lambda e: self._ensure_date_default())
         self.date_entry.bind("<FocusOut>", lambda e: self._validate_or_default_date())
+        # ensure default is present but let StringVar drive content
         self.after(0, self._ensure_date_default)
 
+        # Trip
         ctk.CTkLabel(top, text="Trip No:", font=self.f_base).grid(row=0, column=2, padx=6, pady=6, sticky="w")
-        self.cr_trip = ctk.StringVar()
+        self.cr_trip = tk.StringVar()
         ctk.CTkEntry(top, textvariable=self.cr_trip, width=120, font=self.f_base).grid(row=0, column=3, padx=6)
 
+        # APDN
         ctk.CTkLabel(top, text="APDN (E2):", font=self.f_base).grid(row=0, column=4, padx=6, pady=6, sticky="w")
-        self.cr_apdn_e2 = ctk.StringVar()
+        self.cr_apdn_e2 = tk.StringVar()
         ctk.CTkEntry(top, textvariable=self.cr_apdn_e2, width=140, font=self.f_base).grid(row=0, column=5, padx=6)
 
+        # Car plate
         ctk.CTkLabel(top, text="Car Plate:", font=self.f_base).grid(row=0, column=6, padx=6, pady=6, sticky="w")
-        self.cr_car_plate = ctk.StringVar()
+        self.cr_car_plate = tk.StringVar()
         ctk.CTkEntry(top, textvariable=self.cr_car_plate, width=140, font=self.f_base).grid(row=0, column=7, padx=6)
 
+        # Area
         ctk.CTkLabel(top, text="Area:", font=self.f_base).grid(row=1, column=0, padx=6, pady=6, sticky="w")
         self.cr_area_var = tk.StringVar()
         area_values = self._load_area_names()
@@ -380,10 +352,9 @@ class GTSApp(ctk.CTk):
             values=area_values,
             width=220,
             font=self.f_base,
-            command=lambda _val: self._on_area_changed()   # << use command instead of trace
+            command=lambda _val: self._on_area_changed()
         )
         self.cr_area_box.grid(row=1, column=1, padx=6)
-        # optional: preselect first area so Place list is immediately usable
         if area_values:
             self.cr_area_var.set(area_values[0])
             self.cr_area_box.set(area_values[0])
@@ -394,26 +365,27 @@ class GTSApp(ctk.CTk):
         self.cr_place_box = ctk.CTkComboBox(
             top,
             variable=self.cr_place_var,
-            values=self._load_places_for_current_area(),  # gets filled on area change
+            values=self._load_places_for_current_area(),
             width=160,
             font=self.f_base
         )
         self.cr_place_box.grid(row=1, column=3, padx=6)
-        self._on_area_changed()
+        self._on_area_changed()  # populate places for initial area
 
+        # Seals
         ctk.CTkLabel(top, text="Seal E12:", font=self.f_base).grid(row=2, column=0, padx=6, pady=6, sticky="w")
-        self.cr_seal_e12 = ctk.StringVar()
+        self.cr_seal_e12 = tk.StringVar()
         ctk.CTkEntry(top, textvariable=self.cr_seal_e12, width=140, font=self.f_base).grid(row=2, column=1, padx=6)
 
         ctk.CTkLabel(top, text="Seal K3:", font=self.f_base).grid(row=2, column=2, padx=6, pady=6, sticky="w")
-        self.cr_seal_k3 = ctk.StringVar()
+        self.cr_seal_k3 = tk.StringVar()
         ctk.CTkEntry(top, textvariable=self.cr_seal_k3, width=140, font=self.f_base).grid(row=2, column=3, padx=6)
 
         ctk.CTkButton(top, text="Add Area",  command=self._add_area_dialog,  font=self.f_base).grid(row=1, column=4, padx=6)
         ctk.CTkButton(top, text="Add Place", command=self._add_place_dialog, font=self.f_base).grid(row=1, column=5, padx=6)
         ctk.CTkButton(top, text="Manage Areas/Places", command=self._guarded_manage_places_dialog, font=self.f_base).grid(row=1, column=6, padx=6)
 
-        # Two-column section: Estate (left) & Kilang (right)
+        # Two-column section
         two_col = ctk.CTkFrame(f)
         two_col.pack(fill="both", expand=True, padx=12, pady=6)
         two_col.grid_columnconfigure(0, weight=1)
@@ -430,7 +402,6 @@ class GTSApp(ctk.CTk):
         self.kilang_files = {}; self.kilang_marks = {}
         self._build_mark_attach_grid(right, REQUIRED_K, self.kilang_files, self.kilang_marks)
 
-        # Remarks under Kilang (modest size)
         ctk.CTkLabel(right, text="Remarks", font=self.f_bold).pack(anchor="w", pady=(8, 2))
         self.cr_remarks = ctk.CTkTextbox(right, height=120, font=self.f_base, wrap="word")
         self.cr_remarks.pack(fill="x")
@@ -443,7 +414,6 @@ class GTSApp(ctk.CTk):
         self.save_warning_label = ctk.CTkLabel(btn_row, text="", font=self.f_base)
         self.save_warning_label.pack(side="right", padx=12)
 
-        # Bottom legend
         legend_text = (
             "E2 - Ramp Pass & APDN; E3 - Timbangan lori tanpa muatan; E4 - Pandangan belakang lori; "
             "E5 - Sisi kiri lori; E6 - Sisi kanan lori; E12 - Selfie dengan seal; E13 - Timbangan lori tanpa muatan; "
@@ -554,7 +524,7 @@ class GTSApp(ctk.CTk):
         vals = self._load_places_for_current_area()
         self.cr_place_box.configure(values=vals)
         self.cr_place_var.set(vals[0] if vals else "")
-      
+
     def _on_area_changed(self):
         self._reload_places_box()
 
@@ -566,6 +536,7 @@ class GTSApp(ctk.CTk):
             DB_CONN.commit()
             self.cr_area_box.configure(values=self._load_area_names())
             self.cr_area_var.set(name.strip())
+            self.cr_area_box.set(name.strip())
             self._reload_places_box()
         except Exception:
             log_exc("_add_area_dialog"); messagebox.showerror("Error", "Failed to add area. See log.")
@@ -587,6 +558,7 @@ class GTSApp(ctk.CTk):
             DB_CONN.commit()
             self._reload_places_box()
             self.cr_place_var.set(code.strip())
+            self.cr_place_box.set(code.strip())
         except Exception:
             log_exc("_add_place_dialog"); messagebox.showerror("Error", "Failed to add place. See log.")
 
@@ -598,7 +570,6 @@ class GTSApp(ctk.CTk):
             if not payload or not sig or not _verify_license_signature(payload, sig) or "admin_pin_hash" not in payload or "admin_pin_salt" not in payload:
                 messagebox.showinfo("Restricted", "This copy has no valid license. Areas/Places are read-only.")
                 return
-            # enforce hostname & expiry if present
             if payload.get("bind_hostname"):
                 import socket
                 if payload.get("hostname") != socket.gethostname():
@@ -610,13 +581,11 @@ class GTSApp(ctk.CTk):
                         messagebox.showerror("License expired", f"License expired on {payload['expires_at']}."); return
                 except Exception:
                     pass
-            # PIN
             pin = simpledialog.askstring("Admin PIN", "Enter Admin PIN to proceed:", parent=self, show="*")
             if pin is None: return
             expected = payload.get("admin_pin_hash"); salt = payload.get("admin_pin_salt")
             if _hash_pin(pin, salt) != expected:
                 messagebox.showerror("Denied", "Incorrect PIN."); return
-            # open dialog
             self._manage_places_dialog()
         except Exception:
             log_exc("_guarded_manage_places_dialog")
@@ -730,13 +699,11 @@ class GTSApp(ctk.CTk):
             if not pr: messagebox.showerror("Error", "Selected place not found"); return
             place_id = pr[0]
 
-            # record directory under images/: PLACE/TRIP/CARPLATE DATE
             safe_place = (place_code or "PLACE").replace(os.sep, "_")
             safe_trip  = (trip or "TRIP").replace(os.sep, "_")
             safe_car   = (car_plate or "NA").replace(os.sep, "_")
             record_dir = os.path.join(IMG_STORE, safe_place, safe_trip, f"{safe_car} {date_s}")
 
-            # Build images per label
             estate_saved = {}
             kilang_saved = {}
             for k in REQUIRED_E:
@@ -826,11 +793,9 @@ class GTSApp(ctk.CTk):
         ctk.CTkButton(filter_row, text="Search", command=self.load_view_records, font=self.f_base).grid(row=0, column=4, padx=10)
         ctk.CTkButton(filter_row, text="Reset",  fg_color="gray80", command=self._reset_view_filters, font=self.f_base).grid(row=1, column=4)
 
-        # BODY: left table + right details
         body = ctk.CTkFrame(f); body.pack(fill="both", expand=True, padx=12, pady=8)
         body.grid_columnconfigure(0, weight=3); body.grid_columnconfigure(1, weight=2); body.grid_rowconfigure(0, weight=1)
 
-        # left table (left-aligned)
         left_wrap = ctk.CTkFrame(body); left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0,8), pady=0)
         cols = ("id", "date", "trip", "status")
         self.tree = ttk.Treeview(left_wrap, columns=cols, show="headings")
@@ -847,7 +812,6 @@ class GTSApp(ctk.CTk):
         hsb = ttk.Scrollbar(left_wrap, orient="horizontal", command=self.tree.xview); hsb.pack(side="bottom", fill="x")
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        # right details
         right = ctk.CTkFrame(body); right.grid(row=0, column=1, sticky="nsew", padx=(8,0), pady=0)
         right.grid_rowconfigure(1, weight=1)
         ctk.CTkLabel(right, text="Record Details", font=self.f_base).grid(row=0, column=0, sticky="w", pady=(0,6))
@@ -907,8 +871,8 @@ class GTSApp(ctk.CTk):
             for i, row in enumerate(rows):
                 rid, date_s, trip_no, area_name, place_code, car_plate, status = row
                 place_code = place_code or "-"
-                trip_no_txt    = (trip_no or "").strip()
-                car_plate_txt  = (car_plate or "").strip()
+                trip_no_txt   = (trip_no or "").strip()
+                car_plate_txt = (car_plate or "").strip()
                 trip_str = place_code or "-"
                 trip_str += f"/{trip_no_txt if trip_no_txt else '-'}"
                 if car_plate_txt:
@@ -1008,9 +972,12 @@ class GTSApp(ctk.CTk):
             area_name = (DB_CURSOR.fetchone() or [""])[0]
             self.cr_area_box.configure(values=self._load_area_names())
             self.cr_area_var.set(area_name)
+            self.cr_area_box.set(area_name)
             self._reload_places_box()
             DB_CURSOR.execute("SELECT code FROM places WHERE id = ?", (pid,))
-            self.cr_place_var.set((DB_CURSOR.fetchone() or [""])[0])
+            pc = (DB_CURSOR.fetchone() or [""])[0]
+            self.cr_place_var.set(pc)
+            self.cr_place_box.set(pc)
 
             self.cr_remarks.delete("0.0", "end")
             self.cr_remarks.insert("0.0", remarks or "")
@@ -1067,6 +1034,7 @@ class GTSApp(ctk.CTk):
             self.save_warning_label.configure(text=f"Missing {len(missing)} marks — saved records will be Incomplete until filled.")
         else:
             self.save_warning_label.configure(text="All labels filled. Saving will compute status accordingly.")
+
     def _ensure_date_default(self):
         if not (self.cr_date.get() or "").strip():
             self.cr_date.set(datetime.date.today().isoformat())
@@ -1078,15 +1046,10 @@ class GTSApp(ctk.CTk):
                 raise ValueError("empty")
             datetime.date.fromisoformat(s)
         except Exception:
-            # fall back to today if empty/invalid
             self.cr_date.set(datetime.date.today().isoformat())
 
 # ---------------- startup login (License + PIN) ----------------
 def _startup_login_guard(max_attempts: int = 5) -> bool:
-    """
-    Verify signed license and prompt for PIN before showing the main UI.
-    Returns True if unlocked, False otherwise.
-    """
     try:
         import tkinter as _tk
         from tkinter import simpledialog as _simpledialog, messagebox as _messagebox
@@ -1124,7 +1087,7 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         tries = 0
         while tries < max_attempts:
             pin = _simpledialog.askstring("GTS Login", f"Enter Admin PIN ({max_attempts-tries} tries left):", show="*", parent=root)
-            if pin is None:  # cancel
+            if pin is None:
                 return False
             expected = payload.get("admin_pin_hash"); salt = payload.get("admin_pin_salt")
             if expected and salt and _hash_pin(pin, salt) == expected:
@@ -1138,7 +1101,7 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         return False
 
 # ---------------- run ----------------
-if __name__ == "__main__":
+  if __name__ == "__main__":
     try:
         if not _startup_login_guard(max_attempts=5):
             raise SystemExit(1)
