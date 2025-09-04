@@ -1,4 +1,4 @@
-# GTS_Summary.py
+# GTS_Summary_regen.py
 """
 GTS SED Desktop App — Regenerated (PDF layout + image limits + car plate + UI tweaks)
 2025-08-28 update:
@@ -260,13 +260,14 @@ def load_json(s):
     except Exception:
         return {}
 
-def copy_images_to_store_if_needed(paths, label, date_str, trip_no):
+def copy_images_to_store_if_needed(paths, label, date_str, trip_no, record_dir=None):
     """Copy images into IMG_STORE if they are outside; keep original if already in store."""
     saved = []
+    target_dir = record_dir or IMG_STORE
+    os.makedirs(target_dir, exist_ok=True)
     for idx, p in enumerate(paths):
         try:
-            if (isinstance(p, str) and os.path.commonpath([os.path.abspath(p), os.path.abspath(IMG_STORE)])
-                    == os.path.abspath(IMG_STORE)):
+            if (isinstance(p, str) and os.path.commonpath([os.path.abspath(p), os.path.abspath(target_dir)]) == os.path.abspath(target_dir)):
                 saved.append(p)
                 continue
         except Exception:
@@ -276,7 +277,7 @@ def copy_images_to_store_if_needed(paths, label, date_str, trip_no):
             safe_trip = (trip_no.replace(" ", "_") if trip_no else "trip")
             ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             fname = f"{date_str}_{safe_trip}_{label}_{idx}_{ts}{base_ext}"
-            dest = os.path.join(IMG_STORE, fname)
+            dest = os.path.join(target_dir, fname)
             shutil.copy2(p, dest)
             saved.append(dest)
         except Exception:
@@ -359,23 +360,14 @@ class _XYScrollFrame(ctk.CTkFrame):
             self._canvas.yview_scroll(1, "units")
 
     def _bind_mousewheel(self, widget):
-        """Bind mouse/trackpad events without using bind_all (CTk forbids it)."""
-        try:
-            toplevel = self.winfo_toplevel()
-        except Exception:
-            toplevel = None
-        targets = [widget]
-        for extra in (getattr(self, "_canvas", None), getattr(self, "content", None), toplevel):
-            if extra is not None:
-                targets.append(extra)
-        for t in targets:
-            try:
-                t.bind("<MouseWheel>", self._on_wheel, add="+")
-                t.bind("<Shift-MouseWheel>", self._on_wheel, add="+")
-                t.bind("<Button-4>", self._on_wheel_linux, add="+")
-                t.bind("<Button-5>", self._on_wheel_linux, add="+")
-            except Exception:
-                pass
+        widget.bind_all("<MouseWheel>", self._on_mousewheel, add="+")        # Windows / most
+        widget.bind_all("<Shift-MouseWheel>", self._on_mousewheel, add="+")
+        widget.bind_all("<Button-4>", self._on_mousewheel_linux, add="+")    # Linux
+        widget.bind_all("<Button-5>", self._on_mousewheel_linux, add="+")
+# ---------------- UI (Light + Roboto) ----------------
+ctk.set_appearance_mode("Light")
+ctk.set_default_color_theme("blue")
+
 def roboto(size=12, weight="normal"):
     # If Roboto absent, Tk will fall back gracefully
     return ctk.CTkFont(family="Roboto", size=size, weight=weight)
@@ -517,6 +509,17 @@ class GTSApp(ctk.CTk):
 
         # When Area changes, reload places
         self.cr_area_var.trace_add("write", lambda *a: self._reload_places_box())
+        # Section: Estate labels
+        ctk.CTkLabel(f, text="Estate (E2–E6, E12–E16)", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
+        self.estate_files = {}
+        self.estate_marks = {}
+        self._build_mark_attach_grid(f, REQUIRED_E, self.estate_files, self.estate_marks)
+
+        # Section: Kilang labels
+        ctk.CTkLabel(f, text="Kilang (K1, K3–K7)", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
+        self.kilang_files = {}
+        self.kilang_marks = {}
+        self._build_mark_attach_grid(f, REQUIRED_K, self.kilang_files, self.kilang_marks)
         btn_row = ctk.CTkFrame(f)
         btn_row.pack(fill="x", padx=12, pady=10)
         ctk.CTkButton(
@@ -536,35 +539,9 @@ class GTSApp(ctk.CTk):
 
         self.save_warning_label = ctk.CTkLabel(btn_row, text="", font=self.f_base)
         self.save_warning_label.pack(side="right", padx=12)
-        # --- Estate + Kilang side-by-side ---
-        two_col = ctk.CTkFrame(f)
-        two_col.pack(fill="both", expand=True, padx=12, pady=(8, 6))
-
-        left_col = ctk.CTkFrame(two_col)
-        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        right_col = ctk.CTkFrame(two_col)
-        right_col.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        two_col.grid_columnconfigure(0, weight=1)
-        two_col.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(left_col, text="Estate (E2–E6, E12–E16)", font=self.f_bold).pack(anchor="w", padx=8, pady=(2, 4))
-        self.estate_files = {}; self.estate_marks = {} 
-        self._build_mark_attach_grid(left_col, REQUIRED_E, self.estate_files, self.estate_marks)
-
-        ctk.CTkLabel(right_col, text="Kilang (K1, K3–K7)", font=self.f_bold).pack(anchor="w", padx=8, pady=(2, 4))
-        self.kilang_files = {}; self.kilang_marks = {} 
-        self._build_mark_attach_grid(right_col, REQUIRED_K, self.kilang_files, self.kilang_marks)
-
-        # Remarks under Kilang (modest height)
-        ctk.CTkLabel(right_col, text="Remarks", font=self.f_bold).pack(anchor="w", padx=8, pady=(8, 2))
-        self.cr_remarks = ctk.CTkTextbox(right_col, height=100, font=self.f_base, wrap="word")
-        self.cr_remarks.pack(fill="x", padx=8, pady=(0, 6))
-
-        # Label legend at the bottom (full width, wraps)
-        legend_box = ctk.CTkFrame(f)
-        legend_box.pack(fill="x", padx=12, pady=(6, 8))
-        ctk.CTkLabel(legend_box, text="E2- Ramp ass & APDN; E3 - Timbangan lori tanpa muatan; E4- Pandangan belakang lori; E5- Sisi kiri lori; E6- Sisi kanan lori; E12- Selfie dengan seal; E13- Timbangan lori ada muatan; E14- Pandangan atas lori; E15- Selfie di hadapan lori; E16- Senarai semak yang lengkap di estate K1- Selfie dengan tangki air kosong; K3- Perbandingan seal; K4- Pandangan belakang lori; K5- Sisi kanan lori; K6- Sisi kiri lori; K7- Senarai semak yang lengkap di kilang.", font=self.f_base, wraplength=1200, justify="left").pack(anchor="w", padx=8, pady=4)
-
+        ctk.CTkLabel(f, text="Remarks", font=self.f_bold).pack(anchor="w", padx=12, pady=(8, 2))
+        self.cr_remarks = ctk.CTkTextbox(f, height=100, font=self.f_base, wrap="word")
+        self.cr_remarks.pack(fill="x", padx=12)
 
 
 
@@ -848,14 +825,21 @@ class GTSApp(ctk.CTk):
             place_id = pr[0]
 
             # Build images per label (REPLACE semantics so Remove works)
+            # Prepare per-record directory inside images/
+            try:
+                trip_name = f"{place_code}/{trip or ''}{('/' + car_plate) if car_plate else ''}".strip('/')
+                record_dir = os.path.join(IMG_STORE, f"{trip_name} {date_s}")
+                os.makedirs(record_dir, exist_ok=True)
+            except Exception:
+                record_dir = IMG_STORE
             estate_saved = {}
             kilang_saved = {}
 
             for k in REQUIRED_E:
-                new_saved = copy_images_to_store_if_needed(self.estate_files[k]["paths"], k, date_s, trip)
+                new_saved = copy_images_to_store_if_needed(self.estate_files[k]["paths"], k, date_s, trip, record_dir=record_dir)
                 estate_saved[k] = list(dict.fromkeys(new_saved))[:2]  # safety
             for k in REQUIRED_K:
-                new_saved = copy_images_to_store_if_needed(self.kilang_files[k]["paths"], k, date_s, trip)
+                new_saved = copy_images_to_store_if_needed(self.kilang_files[k]["paths"], k, date_s, trip, record_dir=record_dir)
                 kilang_saved[k] = list(dict.fromkeys(new_saved))[:2]  # safety
 
             e_marks_map = {k: self.estate_marks[k].get() for k in REQUIRED_E}
@@ -954,7 +938,7 @@ class GTSApp(ctk.CTk):
         for c in cols:
             self.tree.heading(c, text=c.capitalize())
             width = 260 if c == "trip" else (100 if c == "id" else 140)
-            anchor = "w" if c in ("trip",) else "center"
+            anchor = "center"
             self.tree.column(c, width=width, anchor=anchor, stretch=True)
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
@@ -980,8 +964,7 @@ class GTSApp(ctk.CTk):
         btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
         ctk.CTkButton(btns, text="Edit Selected", command=self._edit_selected, font=self.f_base).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Delete Selected", fg_color="#c63", command=self._delete_selected, font=self.f_base).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="Export Selected (PDF)", command=self._export_selected_pdf, font=self.f_base).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="Export All (PDF)", command=self._export_all_pdf, font=self.f_base).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text="Delete Selected (Multi)", fg_color="#a33", command=self._delete_selected_multi, font=self.f_base).pack(side="left", padx=6)
 
         self.v_area.set("")
         self._reload_view_places()
@@ -1203,63 +1186,7 @@ class GTSApp(ctk.CTk):
         return rows
 
     # ---------- PDF Exports ----------
-    def _export_selected_pdf(self):
-        if not REPORTLAB_AVAILABLE:
-            messagebox.showwarning("Missing", "reportlab required for PDF export. Install: pip install reportlab")
-            return
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Select", "Please select record(s) to export.")
-            return
-        ids = [int(i) for i in sel]
-        try:
-            recs = self._fetch_records(where=f"id IN ({','.join('?' * len(ids))})", params=ids)
-            if not recs:
-                messagebox.showinfo("No data", "No records found.")
-                return
-            out = filedialog.asksaveasfilename(defaultextension=".pdf",
-                                               filetypes=[("PDF", "*.pdf")])
-            if not out: return
-            self._export_records_to_pdf(recs, out)
-            messagebox.showinfo("Exported", f"PDF exported to:\n{out}")
-        except Exception:
-            log_exc("_export_selected_pdf")
-            messagebox.showerror("Error", "Failed to export PDF. See log.")
 
-    def _export_all_pdf(self):
-        if not REPORTLAB_AVAILABLE:
-            messagebox.showwarning("Missing", "reportlab required for PDF export. Install: pip install reportlab")
-            return
-        try:
-            recs = self._fetch_records()
-            if not recs:
-                messagebox.showinfo("No data", "No records to export.")
-                return
-            out = filedialog.asksaveasfilename(defaultextension=".pdf",
-                                               filetypes=[("PDF", "*.pdf")])
-            if not out: return
-            self._export_records_to_pdf(recs, out)
-            messagebox.showinfo("Exported", f"PDF exported to:\n{out}")
-        except Exception:
-            log_exc("_export_all_pdf")
-            messagebox.showerror("Error", "Failed to export PDF. See log.")
-
-    def _export_records_to_pdf(self, recs, out_path):
-        c = canvas.Canvas(out_path, pagesize=landscape(A4))
-        w, h = landscape(A4)
-        margin = 12 * mm
-        y = h - margin
-
-        for rec in recs:
-            block_h = self._estimate_block_height(rec, w, h, margin)
-            # Start a new page if not enough space for the entire record
-            if y - block_h < margin:
-                c.showPage()
-                y = h - margin
-            y = self._draw_record_block(c, rec, margin, y, w - 2*margin)
-            y -= 6 * mm  # gap after block
-
-        c.save()
 
     def _estimate_block_height(self, rec, w, h, margin):
         """Rough height estimate in points to decide page breaks (avoid splitting a record)."""
