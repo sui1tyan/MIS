@@ -359,14 +359,23 @@ class _XYScrollFrame(ctk.CTkFrame):
             self._canvas.yview_scroll(1, "units")
 
     def _bind_mousewheel(self, widget):
-        widget.bind_all("<MouseWheel>", self._on_mousewheel, add="+")        # Windows / most
-        widget.bind_all("<Shift-MouseWheel>", self._on_mousewheel, add="+")
-        widget.bind_all("<Button-4>", self._on_mousewheel_linux, add="+")    # Linux
-        widget.bind_all("<Button-5>", self._on_mousewheel_linux, add="+")
-# ---------------- UI (Light + Roboto) ----------------
-ctk.set_appearance_mode("Light")
-ctk.set_default_color_theme("blue")
-
+        """Bind mouse/trackpad events without using bind_all (CTk forbids it)."""
+        try:
+            toplevel = self.winfo_toplevel()
+        except Exception:
+            toplevel = None
+        targets = [widget]
+        for extra in (getattr(self, "_canvas", None), getattr(self, "content", None), toplevel):
+            if extra is not None:
+                targets.append(extra)
+        for t in targets:
+            try:
+                t.bind("<MouseWheel>", self._on_wheel, add="+")
+                t.bind("<Shift-MouseWheel>", self._on_wheel, add="+")
+                t.bind("<Button-4>", self._on_wheel_linux, add="+")
+                t.bind("<Button-5>", self._on_wheel_linux, add="+")
+            except Exception:
+                pass
 def roboto(size=12, weight="normal"):
     # If Roboto absent, Tk will fall back gracefully
     return ctk.CTkFont(family="Roboto", size=size, weight=weight)
