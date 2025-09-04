@@ -1101,7 +1101,7 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         return False
 
 # ---------------- run ----------------
-  if __name__ == "__main__":
+if __name__ == "__main__":
     try:
         if not _startup_login_guard(max_attempts=5):
             raise SystemExit(1)
