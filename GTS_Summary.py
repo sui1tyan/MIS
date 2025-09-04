@@ -1251,6 +1251,10 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         root.destroy()
         _messagebox.showerror("Locked", "Too many failed attempts. Exiting.")
         return False
+        
+    except Exception:
+        log_exc("_startup_login_guard")
+        return False
 
 # ---------------- run ----------------
 if __name__ == "__main__":
