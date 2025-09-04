@@ -5,7 +5,7 @@ on:
   push:
     paths:
       - "GTS_Summary.py"
-      - "GTS_LG_ui.py"
+      - "GTS_LG_GUI.py"
       - ".github/workflows/build_workflow.yml"
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
 
       - name: Build GTS_LG (License GUI)
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name GTS_LG GTS_LG_ui.py
+          pyinstaller --noconfirm --onedir --windowed --name GTS_LG GTS_LG_GUI.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
