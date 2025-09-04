@@ -351,8 +351,12 @@ class GTSApp(ctk.CTk):
         top.pack(fill="x", padx=12, pady=4)
 
         ctk.CTkLabel(top, text="Date (YYYY-MM-DD):", font=self.f_base).grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        self.cr_date = ctk.StringVar(value=datetime.date.today().isoformat())
-        ctk.CTkEntry(top, textvariable=self.cr_date, width=140, font=self.f_base).grid(row=0, column=1, padx=6)
+        self.cr_date = tk.StringVar()
+        self.cr_date.set(datetime.date.today().isoformat())
+        self.date_entry = ctk.CTkEntry(top, textvariable=self.cr_date, width=140, font=self.f_base)
+        self.date_entry.grid(row=0, column=1, padx=6)
+        self.date_entry.bind("<FocusIn>",  lambda e: self._ensure_date_default())
+        self.date_entry.bind("<FocusOut>", lambda e: self._validate_or_default_date())
 
         ctk.CTkLabel(top, text="Trip No:", font=self.f_base).grid(row=0, column=2, padx=6, pady=6, sticky="w")
         self.cr_trip = ctk.StringVar()
@@ -367,16 +371,34 @@ class GTSApp(ctk.CTk):
         ctk.CTkEntry(top, textvariable=self.cr_car_plate, width=140, font=self.f_base).grid(row=0, column=7, padx=6)
 
         ctk.CTkLabel(top, text="Area:", font=self.f_base).grid(row=1, column=0, padx=6, pady=6, sticky="w")
-        self.cr_area_var = ctk.StringVar()
-        self.cr_area_box = ctk.CTkComboBox(top, variable=self.cr_area_var,
-                                           values=self._load_area_names(), width=220, font=self.f_base)
+        self.cr_area_var = tk.StringVar()
+        area_values = self._load_area_names()
+        self.cr_area_box = ctk.CTkComboBox(
+            top,
+            variable=self.cr_area_var,
+            values=area_values,
+            width=220,
+            font=self.f_base,
+            command=lambda _val: self._on_area_changed()   # << use command instead of trace
+        )
         self.cr_area_box.grid(row=1, column=1, padx=6)
+        # optional: preselect first area so Place list is immediately usable
+        if area_values:
+            self.cr_area_var.set(area_values[0])
+            self.cr_area_box.set(area_values[0])
 
+        # Place
         ctk.CTkLabel(top, text="Place:", font=self.f_base).grid(row=1, column=2, padx=6, pady=6, sticky="w")
-        self.cr_place_var = ctk.StringVar()
-        self.cr_place_box = ctk.CTkComboBox(top, variable=self.cr_place_var,
-                                            values=self._load_places_for_current_area(), width=160, font=self.f_base)
+        self.cr_place_var = tk.StringVar()
+        self.cr_place_box = ctk.CTkComboBox(
+            top,
+            variable=self.cr_place_var,
+            values=self._load_places_for_current_area(),  # gets filled on area change
+            width=160,
+            font=self.f_base
+        )
         self.cr_place_box.grid(row=1, column=3, padx=6)
+        self._on_area_changed()
 
         ctk.CTkLabel(top, text="Seal E12:", font=self.f_base).grid(row=2, column=0, padx=6, pady=6, sticky="w")
         self.cr_seal_e12 = ctk.StringVar()
@@ -389,8 +411,6 @@ class GTSApp(ctk.CTk):
         ctk.CTkButton(top, text="Add Area",  command=self._add_area_dialog,  font=self.f_base).grid(row=1, column=4, padx=6)
         ctk.CTkButton(top, text="Add Place", command=self._add_place_dialog, font=self.f_base).grid(row=1, column=5, padx=6)
         ctk.CTkButton(top, text="Manage Areas/Places", command=self._guarded_manage_places_dialog, font=self.f_base).grid(row=1, column=6, padx=6)
-
-        self.cr_area_var.trace_add("write", lambda *a: self._reload_places_box())
 
         # Two-column section: Estate (left) & Kilang (right)
         two_col = ctk.CTkFrame(f)
@@ -533,6 +553,9 @@ class GTSApp(ctk.CTk):
         vals = self._load_places_for_current_area()
         self.cr_place_box.configure(values=vals)
         self.cr_place_var.set(vals[0] if vals else "")
+      
+    def _on_area_changed(self):
+        self._reload_places_box()
 
     def _add_area_dialog(self):
         name = simpledialog.askstring("Add Area", "Enter new area name:", parent=self)
@@ -1038,6 +1061,19 @@ class GTSApp(ctk.CTk):
             self.save_warning_label.configure(text=f"Missing {len(missing)} marks — saved records will be Incomplete until filled.")
         else:
             self.save_warning_label.configure(text="All labels filled. Saving will compute status accordingly.")
+    def _ensure_date_default(self):
+        if not (self.cr_date.get() or "").strip():
+            self.cr_date.set(datetime.date.today().isoformat())
+
+    def _validate_or_default_date(self):
+        s = (self.cr_date.get() or "").strip()
+        try:
+            if not s:
+                raise ValueError("empty")
+            datetime.date.fromisoformat(s)
+        except Exception:
+            # fall back to today if empty/invalid
+            self.cr_date.set(datetime.date.today().isoformat())
 
 # ---------------- startup login (License + PIN) ----------------
 def _startup_login_guard(max_attempts: int = 5) -> bool:
