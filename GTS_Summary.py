@@ -602,14 +602,24 @@ class GTSApp(ctk.CTk):
         """Open a management window to view/add/delete Areas and Places."""
         try:
             # prevent multiple dialogs
+            # prevent multiple dialogs
             if hasattr(self, "manage_win") and self.manage_win.winfo_exists():
-                self.manage_win.lift()
-                return
+                try:
+                    self.manage_win.deiconify()
+                    self.manage_win.lift()
+                    self.manage_win.focus_force()
+                except Exception:
+                    pass
+                return    
+
 
             self.manage_win = ctk.CTkToplevel(self)
             win = self.manage_win
             win.title("Manage Areas and Places")
             win.geometry("600x400")
+            win.transient(self)      # keep on top of main window
+            win.focus_force()        # focus it
+
 
             # ---- Left: Areas ----
             left_frame = ctk.CTkFrame(win)
@@ -617,7 +627,7 @@ class GTSApp(ctk.CTk):
 
             ctk.CTkLabel(left_frame, text="Areas", font=self.f_bold).pack(anchor="w")
 
-            self.manage_area_list = tk.Listbox(left_frame, height=15)
+            self.manage_area_list = tk.Listbox(left_frame, height=15, exportselection=False)
             self.manage_area_list.pack(fill="both", expand=True, padx=5, pady=5)
             # reload places when area changes
             self.manage_area_list.bind("<<ListboxSelect>>", lambda e: self._reload_manage_places())
@@ -634,7 +644,7 @@ class GTSApp(ctk.CTk):
 
             ctk.CTkLabel(right_frame, text="Places in selected Area", font=self.f_bold).pack(anchor="w")
 
-            self.manage_place_list = tk.Listbox(right_frame, height=15)
+            self.manage_place_list = tk.Listbox(right_frame, height=15, exportselection=False)
             self.manage_place_list.pack(fill="both", expand=True, padx=5, pady=5)
             # ⚠️ do NOT bind reload here, just let user select freely
             # self.manage_place_list.bind("<<ListboxSelect>>", ...)  # <-- removed
@@ -657,11 +667,12 @@ class GTSApp(ctk.CTk):
     def _reload_manage_places(self):
         """Refresh the Places list based on selected Area in Manage dialog."""
         try:
-            self.manage_place_list.delete(0, "end")
             sel = self.manage_area_list.curselection()
             if not sel:
-                return
+                return  # nothing selected; leave current places alone
             area = self.manage_area_list.get(sel[0])
+
+            self.manage_place_list.delete(0, "end")
             with db_cursor() as cur:
                 cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
                 r = cur.fetchone()
@@ -673,6 +684,7 @@ class GTSApp(ctk.CTk):
                     self.manage_place_list.insert("end", code)
         except Exception:
             log_exc("_reload_manage_places")
+
             
     def _reload_manage_areas(self):
         """Refresh the Areas list in Manage dialog."""
