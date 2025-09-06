@@ -598,88 +598,81 @@ class GTSApp(ctk.CTk):
             log_exc("_add_place_dialog")
             messagebox.showerror("Error", "Failed to add place. See log.")
 
-    def _guarded_manage_places_dialog(self):
-        """Open a management window to view/add/delete Areas and Places."""
-        try:
-            # prevent multiple dialogs
-            if hasattr(self, "manage_win") and self.manage_win.winfo_exists():
-                self.manage_win.lift()
+def _guarded_manage_places_dialog(self):
+    """Open a management window to view/add/delete Areas and Places."""
+    try:
+        # prevent multiple dialogs
+        if hasattr(self, "manage_win") and self.manage_win.winfo_exists():
+            self.manage_win.lift()
+            return
+
+        self.manage_win = ctk.CTkToplevel(self)
+        win = self.manage_win
+        win.title("Manage Areas and Places")
+        win.geometry("600x400")
+
+        # ---- Left: Areas ----
+        left_frame = ctk.CTkFrame(win)
+        left_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+        ctk.CTkLabel(left_frame, text="Areas", font=self.f_bold).pack(anchor="w")
+
+        self.manage_area_list = tk.Listbox(left_frame, height=15)
+        self.manage_area_list.pack(fill="both", expand=True, padx=5, pady=5)
+        # reload places when area changes
+        self.manage_area_list.bind("<<ListboxSelect>>", lambda e: self._reload_manage_places())
+
+        btn_area_row = ctk.CTkFrame(left_frame)
+        btn_area_row.pack(fill="x", pady=5)
+        ctk.CTkButton(btn_area_row, text="Add Area", command=self._add_area_dialog, font=self.f_base).pack(side="left", padx=5)
+        ctk.CTkButton(btn_area_row, text="Delete Area", command=self._delete_selected_area,
+                      fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
+
+        # ---- Right: Places ----
+        right_frame = ctk.CTkFrame(win)
+        right_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+        ctk.CTkLabel(right_frame, text="Places in selected Area", font=self.f_bold).pack(anchor="w")
+
+        self.manage_place_list = tk.Listbox(right_frame, height=15)
+        self.manage_place_list.pack(fill="both", expand=True, padx=5, pady=5)
+        # ⚠️ do NOT bind reload here, just let user select freely
+        # self.manage_place_list.bind("<<ListboxSelect>>", ...)  # <-- removed
+
+        btn_place_row = ctk.CTkFrame(right_frame)
+        btn_place_row.pack(fill="x", pady=5)
+        ctk.CTkButton(btn_place_row, text="Add Place", command=self._add_place_dialog, font=self.f_base).pack(side="left", padx=5)
+        ctk.CTkButton(btn_place_row, text="Delete Place", command=self._delete_selected_place,
+                      fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
+
+        # preload lists
+        self._reload_manage_areas()
+        self._reload_manage_places()
+
+    except Exception:
+        log_exc("_guarded_manage_places_dialog")
+        messagebox.showerror("Error", "Failed to open Manage Areas/Places. See log.")
+
+
+def _reload_manage_places(self):
+    """Refresh the Places list based on selected Area in Manage dialog."""
+    try:
+        self.manage_place_list.delete(0, "end")
+        sel = self.manage_area_list.curselection()
+        if not sel:
+            return
+        area = self.manage_area_list.get(sel[0])
+        with db_cursor() as cur:
+            cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
+            r = cur.fetchone()
+            if not r:
                 return
-
-            self.manage_win = ctk.CTkToplevel(self)
-            win = self.manage_win
-            win.title("Manage Areas and Places")
-            win.geometry("600x400")
-
-            # ---- Left: Areas ----
-            left_frame = ctk.CTkFrame(win)
-            left_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-
-            ctk.CTkLabel(left_frame, text="Areas", font=self.f_bold).pack(anchor="w")
-
-            self.manage_area_list = tk.Listbox(left_frame, height=15)
-            self.manage_area_list.pack(fill="both", expand=True, padx=5, pady=5)
-            self.manage_area_list.bind("<<ListboxSelect>>", lambda e: self._reload_manage_places())
-
-            btn_area_row = ctk.CTkFrame(left_frame)
-            btn_area_row.pack(fill="x", pady=5)
-            ctk.CTkButton(btn_area_row, text="Add Area", command=self._add_area_dialog, font=self.f_base).pack(side="left", padx=5)
-            ctk.CTkButton(btn_area_row, text="Delete Area", command=self._delete_selected_area,
-                          fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
-
-            # ---- Right: Places ----
-            right_frame = ctk.CTkFrame(win)
-            right_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-
-            ctk.CTkLabel(right_frame, text="Places in selected Area", font=self.f_bold).pack(anchor="w")
-
-            self.manage_place_list = tk.Listbox(right_frame, height=15)
-            self.manage_place_list.pack(fill="both", expand=True, padx=5, pady=5)
-
-            btn_place_row = ctk.CTkFrame(right_frame)
-            btn_place_row.pack(fill="x", pady=5)
-            ctk.CTkButton(btn_place_row, text="Add Place", command=self._add_place_dialog, font=self.f_base).pack(side="left", padx=5)
-            ctk.CTkButton(btn_place_row, text="Delete Place", command=self._delete_selected_place,
-                          fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
-
-            # preload lists
-            self._reload_manage_areas()
-            self._reload_manage_places()
-
-        except Exception:
-            log_exc("_guarded_manage_places_dialog")
-            messagebox.showerror("Error", "Failed to open Manage Areas/Places. See log.")
-
-    def _reload_manage_areas(self):
-        """Refresh the Areas list in Manage dialog."""
-        try:
-            self.manage_area_list.delete(0, "end")
-            with db_cursor() as cur:
-                cur.execute("SELECT name FROM areas ORDER BY name")
-                for (name,) in cur.fetchall():
-                    self.manage_area_list.insert("end", name)
-        except Exception:
-            log_exc("_reload_manage_areas")
-
-    def _reload_manage_places(self):
-        """Refresh the Places list based on selected Area in Manage dialog."""
-        try:
-            self.manage_place_list.delete(0, "end")
-            sel = self.manage_area_list.curselection()
-            if not sel:
-                return
-            area = self.manage_area_list.get(sel[0])
-            with db_cursor() as cur:
-                cur.execute("SELECT id FROM areas WHERE name = ?", (area,))
-                r = cur.fetchone()
-                if not r:
-                    return
-                aid = r[0]
-                cur.execute("SELECT code FROM places WHERE area_id=? ORDER BY code", (aid,))
-                for (code,) in cur.fetchall():
-                    self.manage_place_list.insert("end", code)
-        except Exception:
-            log_exc("_reload_manage_places")
+            aid = r[0]
+            cur.execute("SELECT code FROM places WHERE area_id=? ORDER BY code", (aid,))
+            for (code,) in cur.fetchall():
+                self.manage_place_list.insert("end", code)
+    except Exception:
+        log_exc("_reload_manage_places")
 
     def _delete_selected_area(self):
         try:
