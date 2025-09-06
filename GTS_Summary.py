@@ -58,8 +58,9 @@ DEFAULT_AREAS = {
 
 # ---------------- database ----------------
 def get_db_conn():
-    """Return a new SQLite connection."""
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 @contextmanager
 def db_cursor():
@@ -172,7 +173,7 @@ def _canonical_json_bytes(obj):
 def _verify_license_signature(lic_payload: dict, signature_b64: str) -> bool:
     try:
         if not os.path.exists(PUBKEY_PATH):
-            messagebox.showerror("License error", f"Public key file missing: {PUBKEY_PATH}")
+            log_exc("Public key missing")
             return False
         with open(PUBKEY_PATH, "rb") as f:
             data = f.read()
@@ -183,7 +184,6 @@ def _verify_license_signature(lic_payload: dict, signature_b64: str) -> bool:
         return True
     except Exception:
         log_exc("_verify_license_signature")
-        messagebox.showerror("License error", "Public key invalid or signature verification failed.")
         return False
         
 def _hash_pin(pin, salt_hex):
@@ -488,11 +488,26 @@ class GTSApp(ctk.CTk):
 
     def _remove_files(self, label, storage):
         try:
+            # delete existing files if they live in IMG_STORE (edit mode case)
+            for p in list(storage[label].get("paths", [])):
+                self._delete_if_under_store(p)
             storage[label]["paths"] = []
             storage[label]["count_widget"].configure(text="0 files")
         except Exception:
             log_exc("_remove_files")
 
+    def _delete_if_under_store(self, p: str):
+        try:
+            if not p:
+                return
+            ap = os.path.abspath(p)
+            img_root = os.path.abspath(IMG_STORE)
+            # only delete files inside the app's images folder
+            if os.path.exists(ap) and os.path.commonpath([ap, img_root]) == img_root:
+                os.remove(ap)
+        except Exception:
+            log_exc(f"_delete_if_under_store failed for {p}")
+    
     def _clear_create_form(self):
         self.editing_id = None
         self.cr_date.set(datetime.date.today().isoformat())
@@ -819,6 +834,15 @@ class GTSApp(ctk.CTk):
                 safe_car   = (car_plate or "NA").replace(os.sep, "_")
                 record_dir = os.path.join(IMG_STORE, safe_place, safe_trip, f"{safe_car} {date_s}")
 
+                prev_estate = {}
+                prev_kilang = {}
+                if self.editing_id:
+                    cur.execute("SELECT estate_pics, kilang_pics FROM gts_records WHERE id=?", (self.editing_id,))
+                    _row_prev = cur.fetchone()
+                    if _row_prev:
+                        prev_estate = load_json(_row_prev[0]) or {}
+                        prev_kilang = load_json(_row_prev[1]) or {}
+                
                 estate_saved = {}
                 kilang_saved = {}
                 for k in REQUIRED_E:
@@ -834,6 +858,12 @@ class GTSApp(ctk.CTk):
                 remarks = self.cr_remarks.get("0.0", "end").strip()
                 now = datetime.datetime.now().isoformat(timespec="seconds")
 
+                # delete files that are no longer referenced (edit mode)
+                if self.editing_id:
+                    self._cleanup_removed(prev_estate, estate_saved)
+                    self._cleanup_removed(prev_kilang, kilang_saved)
+
+                
                 if not self.editing_id:
                     cur.execute("""
                         INSERT INTO gts_records
@@ -868,6 +898,17 @@ class GTSApp(ctk.CTk):
             log_exc("_save_record")
             messagebox.showerror("Error", "Failed to save record. See log.")
 
+    def _cleanup_removed(self, prev_map, new_map):
+        try:
+            for k, prev_list in (prev_map or {}).items():
+                keep = set((new_map or {}).get(k, []))
+                for p in prev_list or []:
+                    if p not in keep:
+                        self._delete_if_under_store(p)
+        except Exception:
+            log_exc("_cleanup_removed")
+
+    
     # ---------- View Tab ----------
     def _build_view_tab(self):
         ds = DoubleScrollableFrame(self.view_tab)
@@ -1038,7 +1079,11 @@ class GTSApp(ctk.CTk):
                 place_code = (cur.fetchone() or ["-"])[0]
 
             estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
-            e_marks = load_json(e_marks_s);     k_marks = load_json(k_marks_s)
+            estate_data = {k: [p for p in (estate_data.get(k, []) or []) if os.path.exists(p)] for k in REQUIRED_E}
+            kilang_data = {k: [p for p in (kilang_data.get(k, []) or []) if os.path.exists(p)] for k in REQUIRED_K}
+            # ... then the `lines.append(...)` with len(estate_data.get(k, [])) / len(kilang_data.get(k, []))
+            
+            e_marks = load_json(e_marks_s);    k_marks = load_json(k_marks_s)
 
             lines = [
                 f"Date: {date_s}",
@@ -1130,12 +1175,14 @@ class GTSApp(ctk.CTk):
             for k in REQUIRED_K: self.kilang_marks[k].set(k_marks.get(k, ""))
 
             estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
+    
             for k in REQUIRED_E:
-                paths = list(estate_data.get(k, []))[:2]  # enforce 2 max
+                paths = [p for p in (estate_data.get(k, []) or []) if isinstance(p, str) and os.path.exists(p)][:2]
                 self.estate_files[k]["paths"] = paths
                 self.estate_files[k]["count_widget"].configure(text=f"{len(paths)} files")
+
             for k in REQUIRED_K:
-                paths = list(kilang_data.get(k, []))[:2]  # enforce 2 max
+                paths = [p for p in (kilang_data.get(k, []) or []) if isinstance(p, str) and os.path.exists(p)][:2]
                 self.kilang_files[k]["paths"] = paths
                 self.kilang_files[k]["count_widget"].configure(text=f"{len(paths)} files")
 
