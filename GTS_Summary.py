@@ -673,6 +673,18 @@ class GTSApp(ctk.CTk):
                     self.manage_place_list.insert("end", code)
         except Exception:
             log_exc("_reload_manage_places")
+            
+    def _reload_manage_areas(self):
+        """Refresh the Areas list in Manage dialog."""
+        try:
+            self.manage_area_list.delete(0, "end")
+            with db_cursor() as cur:
+                cur.execute("SELECT name FROM areas ORDER BY name")
+                for (name,) in cur.fetchall():
+                    self.manage_area_list.insert("end", name)
+        except Exception:
+            log_exc("_reload_manage_areas")
+
 
     def _delete_selected_area(self):
         try:
