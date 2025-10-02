@@ -1,3 +1,5 @@
+# (Full updated GTS_Summary.py contents)
+# -- BEGIN updated file -----------------------------------------------------
 import os
 import sys
 import json
@@ -247,6 +249,19 @@ ctk.set_default_color_theme("blue")
 def roboto(size=12, weight="normal"):
     return ctk.CTkFont(family="Roboto", size=size, weight=weight)
 
+# --- Force CTk Buttons default to white box + black text + Roboto font ---
+# Store original
+_OrigCTkButton = ctk.CTkButton
+class _CTkButtonAppDefault(_OrigCTkButton):
+    def __init__(self, master=None, **kwargs):
+        kwargs.setdefault("fg_color", "white")
+        kwargs.setdefault("text_color", "black")
+        kwargs.setdefault("hover_color", "#f0f0f0")
+        kwargs.setdefault("font", roboto(12))
+        super().__init__(master, **kwargs)
+# replace global CTkButton with our default-style subclass
+ctk.CTkButton = _CTkButtonAppDefault
+
 # -------- DoubleScrollableFrame --------
 class DoubleScrollableFrame(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
@@ -274,15 +289,52 @@ class DoubleScrollableFrame(ctk.CTkFrame):
             lambda e: self.canvas.itemconfigure(self._win, width=max(e.width, self.inner.winfo_reqwidth()))
         )
 
-        # mouse wheel scrolling
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
-        self.canvas.bind_all("<Shift-MouseWheel>", self._on_shift_wheel)
+        # mouse wheel scrolling: only while cursor is inside the frame
+        # bind on Enter/Leave to enable/disable global wheel listeners
+        def _enable_scroll(event=None):
+            self.canvas.bind_all("<MouseWheel>", self._on_wheel)
+            self.canvas.bind_all("<Shift-MouseWheel>", self._on_shift_wheel)
+            # linux systems alternative events (optional)
+            try:
+                self.canvas.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
+                self.canvas.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
+            except Exception:
+                pass
+
+        def _disable_scroll(event=None):
+            try:
+                self.canvas.unbind_all("<MouseWheel>")
+                self.canvas.unbind_all("<Shift-MouseWheel>")
+                self.canvas.unbind_all("<Button-4>")
+                self.canvas.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        # enable when pointer enters the canvas area, disable on leave
+        self.canvas.bind("<Enter>", _enable_scroll)
+        self.canvas.bind("<Leave>", _disable_scroll)
+        self.inner.bind("<Enter>", _enable_scroll)
+        self.inner.bind("<Leave>", _disable_scroll)
 
     def _on_wheel(self, e):
-        self.canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        # Windows/Mac have e.delta, Linux may use Button-4/5 events handled separately.
+        try:
+            self.canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        except Exception:
+            # fallback
+            try:
+                self.canvas.yview_scroll(-1 if getattr(e, "delta", 0) > 0 else 1, "units")
+            except Exception:
+                pass
 
     def _on_shift_wheel(self, e):
-        self.canvas.xview_scroll(-1 if e.delta > 0 else 1, "units")
+        try:
+            self.canvas.xview_scroll(-1 if e.delta > 0 else 1, "units")
+        except Exception:
+            try:
+                self.canvas.xview_scroll(-1 if getattr(e, "delta", 0) > 0 else 1, "units")
+            except Exception:
+                pass
 
 # ---------------- Main App ----------------
 class GTSApp(ctk.CTk):
@@ -317,15 +369,16 @@ class GTSApp(ctk.CTk):
         self.create_tab = self.tabview.tab("Create Record")
         self.view_tab   = self.tabview.tab("View Records")
 
+        # Build tabs (store DoubleScrollableFrame references to control scrolling)
         self._build_create_tab()
         self._build_view_tab()
         self.load_view_records()
 
     # ---------- Create Tab ----------
     def _build_create_tab(self):
-        ds = DoubleScrollableFrame(self.create_tab)
-        ds.pack(fill="both", expand=True, padx=12, pady=8)
-        f = ds.inner
+        self.create_ds = DoubleScrollableFrame(self.create_tab)
+        self.create_ds.pack(fill="both", expand=True, padx=12, pady=8)
+        f = self.create_ds.inner
 
         ctk.CTkLabel(f, text="Create / Edit Record", font=self.f_h1).pack(pady=(6, 8))
 
@@ -345,7 +398,8 @@ class GTSApp(ctk.CTk):
         # Trip
         ctk.CTkLabel(top, text="Trip No:", font=self.f_base).grid(row=0, column=2, padx=6, pady=6, sticky="w")
         self.cr_trip = tk.StringVar()
-        ctk.CTkEntry(top, textvariable=self.cr_trip, width=120, font=self.f_base).grid(row=0, column=3, padx=6)
+        # make width same as other entries for consistent spacing
+        ctk.CTkEntry(top, textvariable=self.cr_trip, width=140, font=self.f_base).grid(row=0, column=3, padx=6)
 
         # APDN
         ctk.CTkLabel(top, text="APDN (E2):", font=self.f_base).grid(row=0, column=4, padx=6, pady=6, sticky="w")
@@ -417,19 +471,21 @@ class GTSApp(ctk.CTk):
         self._build_mark_attach_grid(right, REQUIRED_K, self.kilang_files, self.kilang_marks)
 
         ctk.CTkLabel(right, text="Remarks", font=self.f_bold).pack(anchor="w", pady=(8, 2))
-        self.cr_remarks = ctk.CTkTextbox(right, height=120, font=self.f_base, wrap="word")
+        # increase height to reduce empty space after trimming the kilang grid
+        self.cr_remarks = ctk.CTkTextbox(right, height=200, font=self.f_base, wrap="word")
         self.cr_remarks.pack(fill="x")
 
-        # Save / Switch
+        # Save / Reset / Switch
         btn_row = ctk.CTkFrame(f); btn_row.pack(fill="x", padx=12, pady=10)
-        ctk.CTkButton(btn_row, text="Save Record", command=self._save_record, font=self.f_base).pack(side="left")
-        ctk.CTkButton(btn_row, text="Switch to View", fg_color="transparent",
-                      command=lambda: self.tabview.set("View Records"), font=self.f_base).pack(side="right")
+        ctk.CTkButton(btn_row, text="Save Record", command=self._save_record, font=self.f_base).pack(side="left", padx=(0,6))
+        ctk.CTkButton(btn_row, text="Reset", command=self._reset_lower_section, font=self.f_base).pack(side="left", padx=(0,6))
+        # use our show_view helper so it scrolls properly
+        ctk.CTkButton(btn_row, text="Switch to View", command=self._show_view_tab, font=self.f_base).pack(side="right")
         self.save_warning_label = ctk.CTkLabel(btn_row, text="", font=self.f_base)
         self.save_warning_label.pack(side="right", padx=12)
 
         legend_text = (
-            "E2 - Ramp Pass & APDN; E3 - Timbangan lori tanpa muatan; E4 - Pandangan belakang lori; "
+            "E2 - Ramp Pass & APDN; E3 - Timbangan lori tanpa muatan; E4 - Pandangan belakang onto; "
             "E5 - Sisi kiri lori; E6 - Sisi kanan lori; E12 - Selfie dengan seal; E13 - Timbangan lori tanpa muatan; "
             "E14 - Pandangan atas lori; E15 - Selfie di hadapan lori; E16 - Senarai semak yang lengkap di Estate\n"
             "K1 - Selfie dengan tangki air kosong; K3 - Perbandingan seal; K4 - Pandangan belakang lori; "
@@ -440,26 +496,37 @@ class GTSApp(ctk.CTk):
         self._update_save_warning()
 
     def _build_mark_attach_grid(self, parent, labels, files_store, marks_store):
+        # Use a compact grid layout — do not expand vertically so there's no blank space after last row.
         wrap = ctk.CTkFrame(parent)
-        wrap.pack(fill="both", expand=True, padx=6, pady=6)
+        wrap.pack(fill="x", padx=6, pady=6)
+        wrap.grid_columnconfigure(0, weight=1)
+
         for i, lab in enumerate(labels):
             frame = ctk.CTkFrame(wrap)
-            frame.grid(row=i, column=0, padx=6, pady=4, sticky="w")
+            frame.grid(row=i, column=0, sticky="ew", pady=4)
+            # Columns: 0=label, 1=buttons, 2=count (stretch), 3=radios
+            frame.grid_columnconfigure(0, weight=0)
+            frame.grid_columnconfigure(1, weight=0)
+            frame.grid_columnconfigure(2, weight=1)
+            frame.grid_columnconfigure(3, weight=0)
 
-            ctk.CTkLabel(frame, text=lab, width=44, font=self.f_base).pack(side="left", padx=(4, 6))
+            lbl = ctk.CTkLabel(frame, text=lab, width=44, font=self.f_base)
+            lbl.grid(row=0, column=0, padx=(4, 6), sticky="w")
 
-            btncol = ctk.CTkFrame(frame); btncol.pack(side="left")
+            btncol = ctk.CTkFrame(frame)
+            btncol.grid(row=0, column=1, sticky="w")
             ctk.CTkButton(btncol, text="Attach", width=80,
-                          command=lambda l=lab, fs=files_store: self._attach_files(l, fs), font=self.f_base).pack(side="top")
-            ctk.CTkButton(btncol, text="Remove", width=80, fg_color="gray80",
-                          command=lambda l=lab, fs=files_store: self._remove_files(l, fs), font=self.f_base).pack(side="top", pady=(4,0))
+                          command=lambda l=lab, fs=files_store: self._attach_files(l, fs), font=self.f_base).pack(side="left")
+            ctk.CTkButton(btncol, text="Remove", width=80,
+                          command=lambda l=lab, fs=files_store: self._remove_files(l, fs), font=self.f_base).pack(side="left", padx=(4,0))
 
-            count_lbl = ctk.CTkLabel(frame, text="0 files", width=90, font=self.f_base)
-            count_lbl.pack(side="left", padx=(6, 0))
+            count_lbl = ctk.CTkLabel(frame, text="0 files", font=self.f_base)
+            count_lbl.grid(row=0, column=2, sticky="w", padx=(6,0))
 
             var = tk.StringVar(value="")
             var.trace_add("write", lambda *a: self._update_save_warning())
-            rb = ctk.CTkFrame(frame); rb.pack(side="left", padx=(8, 4))
+            rb = ctk.CTkFrame(frame)
+            rb.grid(row=0, column=3, padx=(8, 4), sticky="w")
             ctk.CTkRadioButton(rb, text="Y", variable=var, value="tick", font=self.f_base).pack(side="left", padx=2)
             ctk.CTkRadioButton(rb, text="N", variable=var, value="cross", font=self.f_base).pack(side="left", padx=2)
             ctk.CTkRadioButton(rb, text="0", variable=var, value="zero", font=self.f_base).pack(side="left", padx=2)
@@ -617,7 +684,6 @@ class GTSApp(ctk.CTk):
         """Open a management window to view/add/delete Areas and Places."""
         try:
             # prevent multiple dialogs
-            # prevent multiple dialogs
             if hasattr(self, "manage_win") and self.manage_win.winfo_exists():
                 try:
                     self.manage_win.deiconify()
@@ -627,14 +693,12 @@ class GTSApp(ctk.CTk):
                     pass
                 return    
 
-
             self.manage_win = ctk.CTkToplevel(self)
             win = self.manage_win
             win.title("Manage Areas and Places")
             win.geometry("600x400")
             win.transient(self)      # keep on top of main window
             win.focus_force()        # focus it
-
 
             # ---- Left: Areas ----
             left_frame = ctk.CTkFrame(win)
@@ -650,8 +714,8 @@ class GTSApp(ctk.CTk):
             btn_area_row = ctk.CTkFrame(left_frame)
             btn_area_row.pack(fill="x", pady=5)
             ctk.CTkButton(btn_area_row, text="Add Area", command=self._add_area_dialog, font=self.f_base).pack(side="left", padx=5)
-            ctk.CTkButton(btn_area_row, text="Delete Area", command=self._delete_selected_area,
-                          fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
+            # keep 'Delete Area' but default white style
+            ctk.CTkButton(btn_area_row, text="Delete Area", command=self._delete_selected_area, font=self.f_base).pack(side="left", padx=5)
 
             # ---- Right: Places ----
             right_frame = ctk.CTkFrame(win)
@@ -661,14 +725,11 @@ class GTSApp(ctk.CTk):
 
             self.manage_place_list = tk.Listbox(right_frame, height=15, exportselection=False)
             self.manage_place_list.pack(fill="both", expand=True, padx=5, pady=5)
-            # ⚠️ do NOT bind reload here, just let user select freely
-            # self.manage_place_list.bind("<<ListboxSelect>>", ...)  # <-- removed
 
             btn_place_row = ctk.CTkFrame(right_frame)
             btn_place_row.pack(fill="x", pady=5)
             ctk.CTkButton(btn_place_row, text="Add Place", command=self._add_place_dialog, font=self.f_base).pack(side="left", padx=5)
-            ctk.CTkButton(btn_place_row, text="Delete Place", command=self._delete_selected_place,
-                          fg_color="#c63", font=self.f_base).pack(side="left", padx=5)
+            ctk.CTkButton(btn_place_row, text="Delete Place", command=self._delete_selected_place, font=self.f_base).pack(side="left", padx=5)
 
             # preload lists
             self._reload_manage_areas()
@@ -908,12 +969,36 @@ class GTSApp(ctk.CTk):
         except Exception:
             log_exc("_cleanup_removed")
 
-    
+    # ---------- Create reset lower section ----------
+    def _reset_lower_section(self):
+        """Clear estate/kilang attachments, marks and remarks only."""
+        try:
+            for k in self.estate_files:
+                # delete files under store if they are in IMG_STORE
+                for p in list(self.estate_files[k].get("paths", [])):
+                    self._delete_if_under_store(p)
+                self.estate_files[k]["paths"] = []
+                self.estate_files[k]["count_widget"].configure(text="0 files")
+            for k in self.kilang_files:
+                for p in list(self.kilang_files[k].get("paths", [])):
+                    self._delete_if_under_store(p)
+                self.kilang_files[k]["paths"] = []
+                self.kilang_files[k]["count_widget"].configure(text="0 files")
+            for k in self.estate_marks:
+                self.estate_marks[k].set("")
+            for k in self.kilang_marks:
+                self.kilang_marks[k].set("")
+            self.cr_remarks.delete("0.0", "end")
+            self._update_save_warning()
+        except Exception:
+            log_exc("_reset_lower_section")
+            messagebox.showerror("Error", "Failed to reset lower section. See log.")
+
     # ---------- View Tab ----------
     def _build_view_tab(self):
-        ds = DoubleScrollableFrame(self.view_tab)
-        ds.pack(fill="both", expand=True, padx=12, pady=8)
-        f = ds.inner
+        self.view_ds = DoubleScrollableFrame(self.view_tab)
+        self.view_ds.pack(fill="both", expand=True, padx=12, pady=8)
+        f = self.view_ds.inner
 
         ctk.CTkLabel(f, text="View / Search Records", font=self.f_h1).pack(pady=(6,8))
 
@@ -947,7 +1032,7 @@ class GTSApp(ctk.CTk):
         ctk.CTkComboBox(filter_row, values=["", "Complete", "Incomplete"], variable=self.v_status, width=180, font=self.f_base).grid(row=2, column=3, padx=6)
 
         ctk.CTkButton(filter_row, text="Search", command=self.load_view_records, font=self.f_base).grid(row=0, column=4, padx=10)
-        ctk.CTkButton(filter_row, text="Reset",  fg_color="gray80", command=self._reset_view_filters, font=self.f_base).grid(row=1, column=4)
+        ctk.CTkButton(filter_row, text="Reset",  command=self._reset_view_filters, font=self.f_base).grid(row=1, column=4)
 
         body = ctk.CTkFrame(f); body.pack(fill="both", expand=True, padx=12, pady=8)
         body.grid_columnconfigure(0, weight=3); body.grid_columnconfigure(1, weight=2); body.grid_rowconfigure(0, weight=1)
@@ -958,16 +1043,21 @@ class GTSApp(ctk.CTk):
         for c in cols:
             self.tree.heading(c, text=c.capitalize(), anchor="w")
             if c == "trip":
-                width = 220
+                width = 300
+            elif c == "id":
+                width = 60
+            elif c == "date":
+                width = 120
             elif c in ("area", "place", "car_plate"):
                 width = 140
             else:
-                width = 100
-            self.tree.column(c, width=width, anchor="w", stretch=True)
+                width = 120
+            # FIXED size for columns (don't stretch)
+            self.tree.column(c, width=width, anchor="w", stretch=False)
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
-        self.tree.tag_configure('incomplete', background='#fff5d6')
+        self.tree.tag_configure('incomplete', background='#ffd6d6')  # red-ish for incomplete
         self.tree.tag_configure('complete',   background='#eafff2')
         vsb = ttk.Scrollbar(left_wrap, orient="vertical",   command=self.tree.yview); vsb.pack(side="right",  fill="y")
         hsb = ttk.Scrollbar(left_wrap, orient="horizontal", command=self.tree.xview); hsb.pack(side="bottom", fill="x")
@@ -975,13 +1065,24 @@ class GTSApp(ctk.CTk):
 
         right = ctk.CTkFrame(body); right.grid(row=0, column=1, sticky="nsew", padx=(8,0), pady=0)
         right.grid_rowconfigure(1, weight=1)
+        right.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(right, text="Record Details", font=self.f_base).grid(row=0, column=0, sticky="w", pady=(0,6))
+        # detail text + vertical scrollbar
         self.detail_text = ctk.CTkTextbox(right, height=520, font=self.f_base, wrap="word")
         self.detail_text.grid(row=1, column=0, sticky="nsew")
 
-        btns = ctk.CTkFrame(right); btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
+        # scrollbar for detail_text
+        detail_vsb = ttk.Scrollbar(right, orient="vertical", command=self.detail_text.yview)
+        detail_vsb.grid(row=1, column=1, sticky="ns")
+        try:
+            # CTkTextbox supports configuring yscrollcommand
+            self.detail_text.configure(yscrollcommand=detail_vsb.set)
+        except Exception:
+            pass
+
+        btns = ctk.CTkFrame(right); btns.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6,0))
         ctk.CTkButton(btns, text="Edit Selected",   command=self._edit_selected, font=self.f_base).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="Delete Selected", fg_color="#c63", command=self._delete_selected, font=self.f_base).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text="Delete Selected", command=self._delete_selected, font=self.f_base).pack(side="left", padx=6)
 
         self.v_area.set(""); self._reload_view_places()
 
@@ -1081,7 +1182,6 @@ class GTSApp(ctk.CTk):
             estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
             estate_data = {k: [p for p in (estate_data.get(k, []) or []) if os.path.exists(p)] for k in REQUIRED_E}
             kilang_data = {k: [p for p in (kilang_data.get(k, []) or []) if os.path.exists(p)] for k in REQUIRED_K}
-            # ... then the `lines.append(...)` with len(estate_data.get(k, [])) / len(kilang_data.get(k, []))
             
             e_marks = load_json(e_marks_s);    k_marks = load_json(k_marks_s)
 
@@ -1108,6 +1208,11 @@ class GTSApp(ctk.CTk):
 
             self.detail_text.delete("0.0", "end")
             self.detail_text.insert("0.0", "\n".join(lines))
+            # ensure detail_text is scrolled to top when record selected
+            try:
+                self.detail_text.yview_moveto(0.0)
+            except Exception:
+                pass
         except Exception:
             log_exc("_on_tree_select"); messagebox.showerror("Error", "Failed to show details. See log.")
 
@@ -1186,7 +1291,8 @@ class GTSApp(ctk.CTk):
                 self.kilang_files[k]["paths"] = paths
                 self.kilang_files[k]["count_widget"].configure(text=f"{len(paths)} files")
 
-            self.tabview.set("Create Record")
+            # show create tab and ensure top
+            self._show_create_tab()
             self._update_save_warning()
         except Exception:
             log_exc("_open_for_edit"); messagebox.showerror("Error", "Failed to open record for edit. See log.")
@@ -1249,6 +1355,40 @@ class GTSApp(ctk.CTk):
         except Exception:
             messagebox.showwarning("Bad date", "Invalid date format. Resetting to today.")
             self.cr_date.set(datetime.date.today().isoformat())
+
+    # ---------- tab navigation helpers ----------
+    def _show_create_tab(self):
+        """Switch to Create tab and scroll view to top."""
+        try:
+            self.tabview.set("Create Record")
+            # scroll canvas to top-left
+            try:
+                self.create_ds.canvas.xview_moveto(0)
+                self.create_ds.canvas.yview_moveto(0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _show_view_tab(self):
+        """Switch to View tab and ensure table & details are scrolled to top-left."""
+        try:
+            self.tabview.set("View Records")
+            try:
+                self.view_ds.canvas.xview_moveto(0)
+                self.view_ds.canvas.yview_moveto(0)
+            except Exception:
+                pass
+            try:
+                self.tree.xview_moveto(0)
+            except Exception:
+                pass
+            try:
+                self.detail_text.yview_moveto(0)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 # ---------------- startup login (License + PIN) ----------------
 def _startup_login_guard(max_attempts: int = 5) -> bool:
@@ -1332,3 +1472,4 @@ if __name__ == "__main__":
     except Exception:
         log_exc("Fatal error running app")
         raise
+# -- END updated file -------------------------------------------------------
