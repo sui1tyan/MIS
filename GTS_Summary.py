@@ -76,7 +76,7 @@ try:
 
     try:
         import time
-        time.sleep(0.4)
+        time.sleep(2)
     except Exception:
         pass
 
