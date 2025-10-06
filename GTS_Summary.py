@@ -1256,8 +1256,8 @@ class GTSApp(ctk.CTk):
             # FIXED size for columns (don't stretch)
             self.tree.column(c, width=width, anchor="w", stretch=False)
         self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<Double-1>", self._on_tree_double_click(event))
-        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select(event))
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.tag_configure('incomplete', background='#ffd6d6')  # red-ish for incomplete
         self.tree.tag_configure('complete',   background='#eafff2')
         vsb = ttk.Scrollbar(left_wrap, orient="vertical", command=self.tree.yview)
