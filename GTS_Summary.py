@@ -1235,9 +1235,12 @@ class GTSApp(ctk.CTk):
         body = ctk.CTkFrame(f); body.pack(fill="both", expand=True, padx=12, pady=8)
         body.grid_columnconfigure(0, weight=3); body.grid_columnconfigure(1, weight=2); body.grid_rowconfigure(0, weight=1)
 
-        left_wrap = ctk.CTkFrame(body); left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0,8), pady=0)
+        left_wrap = ctk.CTkFrame(body)
+        left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0,8), pady=0)
+        
         cols = ("id", "date", "trip", "area", "place", "car_plate", "status")
         self.tree = ttk.Treeview(left_wrap, columns=cols, show="headings")
+        
         for c in cols:
             self.tree.heading(c, text=c.capitalize(), anchor="w")
             if c == "trip":
@@ -1253,12 +1256,14 @@ class GTSApp(ctk.CTk):
             # FIXED size for columns (don't stretch)
             self.tree.column(c, width=width, anchor="w", stretch=False)
         self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<Double-1>", self._on_tree_double_click)
-        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.tree.bind("<Double-1>", self._on_tree_double_click(event))
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select(event))
         self.tree.tag_configure('incomplete', background='#ffd6d6')  # red-ish for incomplete
         self.tree.tag_configure('complete',   background='#eafff2')
-        vsb = ttk.Scrollbar(left_wrap, orient="vertical",   command=self.tree.yview); vsb.pack(side="right",  fill="y")
-        hsb = ttk.Scrollbar(left_wrap, orient="horizontal", command=self.tree.xview); hsb.pack(side="bottom", fill="x")
+        vsb = ttk.Scrollbar(left_wrap, orient="vertical", command=self.tree.yview)
+        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(left_wrap, orient="horizontal", command=self.tree.xview) 
+        hsb.pack(side="bottom", fill="x")
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
         right = ctk.CTkFrame(body); right.grid(row=0, column=1, sticky="nsew", padx=(8,0), pady=0)
@@ -1349,15 +1354,22 @@ class GTSApp(ctk.CTk):
 
     def _on_tree_double_click(self, event):
         sel = self.tree.selection()
-        if not sel: return
-        rid = int(sel[0])
-        self._open_for_edit(rid)
+        if not sel: 
+            return
+        try:
+            rid = int(sel[0])
+            self._open_for_edit(rid)
+        except Exception:
+            log_exc("_on_tree_double_click")
+            messagebox.showerror("Error", "Failed to open record for editing.")
 
     def _on_tree_select(self, event):
         sel = self.tree.selection()
         if not sel: return
         rid = int(sel[0])
         try:
+            rid = int(sel[0])
+            
             with db_cursor() as cur:
                 cur.execute("""
                     SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
@@ -1378,27 +1390,24 @@ class GTSApp(ctk.CTk):
                 cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
                 place_code = (cur.fetchone() or ["-"])[0]
 
+            # Load estate and kilang data safely
             estate_data = load_json(estate_s)
-            for k in REQUIRED_E:
-                resolved = []
-                for p in (estate_data.get(k, []) or []):
-                    abs_p = self._resolve_path(p)
-                    if abs_p and os.path.exists(abs_p):
-                        resolved.append(abs_p)
-                resolved = resolved[:2]  # keep max 2 files per UI slot
-                self.estate_files[k]["paths"] = resolved
-                self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
-            
             kilang_data = load_json(kilang_s)
+            for k in REQUIRED_E:
+                estate_data[k] = [
+                    self._resolve_path(p) for p in (estate_data.get(k, []) or [])
+                    if isinstance(p, str) and os.path.exists(self._resolve_path(p))
+                ][:2]
+
             for k in REQUIRED_K:
-                resolved = []
-                for p in (kilang_data.get(k, []) or []):
-                    abs_p = self._resolve_path(p)
-                    if abs_p and os.path.exists(abs_p):
-                        resolved.append(abs_p)
-                resolved = resolved[:2]
-                self.kilang_files[k]["paths"] = resolved
-                self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+                kilang_data[k] = [
+                    self._resolve_path(p) for p in (kilang_data.get(k, []) or [])
+                    if isinstance(p, str) and os.path.exists(self._resolve_path(p))
+                ][:2]
+
+            # Load marks
+            e_marks = load_json(e_marks_s)
+            k_marks = load_json(k_marks_s)
 
             estate_data = {
                 k: [
@@ -1407,6 +1416,7 @@ class GTSApp(ctk.CTk):
                 ]
                 for k in REQUIRED_E
             }
+        
             kilang_data = {
                 k: [
                     p for p in (kilang_data.get(k, []) or [])
