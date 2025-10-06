@@ -28,16 +28,16 @@ jobs:
 
       - name: Build GTS_Summary (Windows)
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name GTS_Summary GTS_Summary.py
+          pyinstaller --noconfirm --onefile --windowed --name GTS_Summary GTS_Summary.py --icon=SED_ICON.ico --add-data "SED_ICON.jpg;."
 
       - name: Build GTS_LG (Windows)
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name GTS_LG GTS_LG_GUI.py
+          pyinstaller --noconfirm --onefile --windowed --name GTS_LG GTS_LG_GUI.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: GTS_Apps_Windows
           path: |
-            dist/GTS_Summary
-            dist/GTS_LG
+            dist/GTS_Summary.exe
+            dist/GTS_LG.exe
