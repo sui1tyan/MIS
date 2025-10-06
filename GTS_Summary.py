@@ -13,6 +13,21 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 from contextlib import contextmanager
 
+# ---------- Helper: Resolve file paths ----------
+def _resolve_path(self, p):
+    """
+    Convert a path to absolute path.
+    - If p is already absolute, return normalized absolute path.
+    - If p is relative, assume relative to IMG_STORE.
+    - Returns None for invalid input.
+    """
+    if not p or not isinstance(p, str):
+        return None
+    # ensure IMG_STORE is absolute
+    store = IMG_STORE if os.path.isabs(IMG_STORE) else os.path.abspath(IMG_STORE)
+    abs_p = p if os.path.isabs(p) else os.path.join(store, p)
+    return os.path.normpath(os.path.abspath(abs_p))
+
 # ---------------- cleanup stale _MEI folders ----------------
 try:
     import shutil
@@ -1105,47 +1120,74 @@ class GTSApp(ctk.CTk):
             log_exc("_save_record")
             messagebox.showerror("Error", "Failed to save record. See log.")
 
-    def _cleanup_removed(self, prev_map, new_map):
+   def _cleanup_removed(self, prev_map, new_map):
+        """
+        Remove any files that were previously in prev_map but no longer exist in new_map.
+        Only deletes files under IMG_STORE.
+        """
         try:
-            for k, prev_list in (prev_map or {}).items():
-                # build set of absolute keep-paths
-                keep = set()
-                for np in (new_map or {}).get(k, []):
-                    if not np:
+            prev_map = prev_map or {}
+            new_map = new_map or {}
+
+            for key, prev_list in prev_map.items():
+                # Build set of absolute paths that should be kept
+                keep_set = set()
+                for np in new_map.get(key, []):
+                    if not np or not isinstance(np, str):
                         continue
-                    rp = np if os.path.isabs(np) else os.path.join(IMG_STORE, np)
-                    keep.add(os.path.abspath(rp))
+                    abs_np = self._resolve_path(np)
+                    keep_set.add(abs_np)
+
+                # Iterate previous paths and delete if not in keep_set
                 for p in prev_list or []:
-                    if not p:
+                    if not p or not isinstance(p, str):
                         continue
-                    prev_abs = os.path.abspath(p if os.path.isabs(p) else os.path.join(IMG_STORE, p))
-                    if prev_abs not in keep:
-                        # delete by passing the absolute path to delete helper
-                        self._delete_if_under_store(prev_abs)
+                    abs_prev = self._resolve_path(p)
+                    if abs_prev not in keep_set:
+                        # Only delete if it is under IMG_STORE
+                        self._delete_if_under_store(abs_prev)
+
         except Exception:
             log_exc("_cleanup_removed")
 
     # ---------- Create reset lower section ----------
     def _reset_lower_section(self):
-        """Clear estate/kilang attachments, marks and remarks only."""
+        """Clear estate/kilang attachments, marks, and remarks, and remove files safely."""
         try:
-            for k in self.estate_files:
-                # delete files under store if they are in IMG_STORE
-                for p in list(self.estate_files[k].get("paths", [])):
-                    self._delete_if_under_store(p)
-                self.estate_files[k]["paths"] = []
-                self.estate_files[k]["count_widget"].configure(text="0 files")
-            for k in self.kilang_files:
-                for p in list(self.kilang_files[k].get("paths", [])):
-                    self._delete_if_under_store(p)
-                self.kilang_files[k]["paths"] = []
-                self.kilang_files[k]["count_widget"].configure(text="0 files")
-            for k in self.estate_marks:
-                self.estate_marks[k].set("")
-            for k in self.kilang_marks:
-                self.kilang_marks[k].set("")
+            # Helper to normalize paths before deletion
+            def norm(p):
+                if not p:
+                    return None
+                return os.path.normpath(os.path.abspath(p if os.path.isabs(p) else os.path.join(IMG_STORE, p)))
+
+            # Reset estate files
+            for k, data in self.estate_files.items():
+                for p in list(data.get("paths", [])):
+                    abs_p = self._resolve_path(p)
+                    if abs_p and os.path.exists(abs_p):
+                        self._delete_if_under_store(abs_p)
+                data["paths"] = []
+                data["count_widget"].configure(text="0 files")
+
+            # Reset kilang files
+            for k, data in self.kilang_files.items():
+                for p in list(data.get("paths", [])):
+                    abs_p = self._resolve_path(p)
+                    if abs_p and os.path.exists(abs_p):
+                        self._delete_if_under_store(abs_p)
+                data["paths"] = []
+                data["count_widget"].configure(text="0 files")
+
+            # Reset marks
+            for k in self.estate_marks: self.estate_marks[k].set("")
+            for k in self.kilang_marks: self.kilang_marks[k].set("")
+
+            # Reset remarks
             self.cr_remarks.delete("0.0", "end")
+
+            # Update save warning
             self._update_save_warning()
+
         except Exception:
             log_exc("_reset_lower_section")
             messagebox.showerror("Error", "Failed to reset lower section. See log.")
@@ -1337,25 +1379,38 @@ class GTSApp(ctk.CTk):
                 place_code = (cur.fetchone() or ["-"])[0]
 
             estate_data = load_json(estate_s)
+            for k in REQUIRED_E:
+                resolved = []
+                for p in (estate_data.get(k, []) or []):
+                    abs_p = self._resolve_path(p)
+                    if abs_p and os.path.exists(abs_p):
+                        resolved.append(abs_p)
+                resolved = resolved[:2]  # keep max 2 files per UI slot
+                self.estate_files[k]["paths"] = resolved
+                self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+            
             kilang_data = load_json(kilang_s)
-
-            def _resolve_path(p):
-                """Return absolute path (resolve relative ones inside IMG_STORE)."""
-                if not p:
-                    return None
-                return os.path.join(IMG_STORE, p) if not os.path.isabs(p) else p
+            for k in REQUIRED_K:
+                resolved = []
+                for p in (kilang_data.get(k, []) or []):
+                    abs_p = self._resolve_path(p)
+                    if abs_p and os.path.exists(abs_p):
+                        resolved.append(abs_p)
+                resolved = resolved[:2]
+                self.kilang_files[k]["paths"] = resolved
+                self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
 
             estate_data = {
                 k: [
                     p for p in (estate_data.get(k, []) or [])
-                    if os.path.exists(_resolve_path(p))
+                    if os.path.exists(self._resolve_path(p))
                 ]
                 for k in REQUIRED_E
             }
             kilang_data = {
                 k: [
                     p for p in (kilang_data.get(k, []) or [])
-                    if os.path.exists(_resolve_path(p))
+                    if os.path.exists(self._resolve_path(p))
                 ]
                 for k in REQUIRED_K
             }
@@ -1396,10 +1451,14 @@ class GTSApp(ctk.CTk):
             messagebox.showerror("Error", "Failed to show details. See log.")
 
     def _edit_selected(self):
+        """Open selected record for editing."""
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo("Select", "Please select a record to edit."); return
-        rid = int(sel[0]); self._open_for_edit(rid)
+            messagebox.showinfo("Select", "Please select a record to edit.")
+            return
+        rid = int(sel[0])
+        # Open for edit with normalized paths
+        self._open_for_edit(rid)
 
     def _open_for_edit(self, rid):
         try:
@@ -1465,8 +1524,8 @@ class GTSApp(ctk.CTk):
                 for p in (estate_data.get(k, []) or []):
                     if not isinstance(p, str): 
                         continue
-                    rp = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
-                    if os.path.exists(rp):
+                    rp = self._resolve_path(p)
+                    if rp and os.path.exists(rp):
                         resolved.append(rp)
                 resolved = resolved[:2]
                 self.estate_files[k]["paths"] = resolved
@@ -1551,17 +1610,39 @@ class GTSApp(ctk.CTk):
 
     # ---------- tab navigation helpers ----------
     def _show_create_tab(self):
-        """Switch to Create tab and scroll view to top."""
+        """Switch to Create tab and ensure the UI is reset and paths are normalized."""
         try:
             self.tabview.set("Create Record")
-            # scroll canvas to top-left
+
+            # Scroll to top-left
             try:
                 self.create_ds.canvas.xview_moveto(0)
                 self.create_ds.canvas.yview_moveto(0)
             except Exception:
                 pass
+
+            # Normalize current paths for all estate/kilang files
+            def normalize_paths(files_dict):
+                for k, data in files_dict.items():
+                    paths = data.get("paths", [])
+                    normalized = []
+                    for p in paths:
+                        if not p or not isinstance(p, str):
+                            continue
+                        abs_p = self._resolve_path(p)
+                        if os.path.exists(abs_p):
+                            normalized.append(abs_p)
+                    data["paths"] = normalized
+                    data["count_widget"].configure(text=f"{len(normalized)} files")
+
+            normalize_paths(self.estate_files)
+            normalize_paths(self.kilang_files)
+
+            # Reset marks UI warning
+            self._update_save_warning()
+
         except Exception:
-            pass
+            log_exc("_show_create_tab")
 
     def _show_view_tab(self):
         """Switch to View tab and ensure table & details are scrolled to top-left."""
