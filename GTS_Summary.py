@@ -1374,95 +1374,94 @@ class GTSApp(ctk.CTk):
             except Exception:
                 return
 
-        # Fetch record from DB
-        with db_cursor() as cur:
-            cur.execute("""
-                SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
-                       estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
-                FROM gts_records WHERE id = ?
-            """, (rid,))
-            r = cur.fetchone()
-        if not r:
-            return
+            # Fetch record from DB
+            with db_cursor() as cur:
+                cur.execute("""
+                    SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                           estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
+                    FROM gts_records WHERE id = ?
+                """, (rid,))
+                r = cur.fetchone()
+            if not r:
+                return
 
-        (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
-         estate_s, kilang_s, e_marks_s, k_marks_s,
-         remarks, status, created, updated) = r
+            (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
+             estate_s, kilang_s, e_marks_s, k_marks_s,
+             remarks, status, created, updated) = r
 
-        # Get area and place names
-        with db_cursor() as cur:
-            cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
-            area_name = (cur.fetchone() or ["-"])[0]
-            cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
-            place_code = (cur.fetchone() or ["-"])[0]
+            # Get area and place names
+            with db_cursor() as cur:
+                cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+                area_name = (cur.fetchone() or ["-"])[0]
+                cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
+                place_code = (cur.fetchone() or ["-"])[0]
 
-        # Safe path resolver
-        def safe_resolve(p):
-            try:
-                if not p or not isinstance(p, str):
+            # Safe path resolver
+            def safe_resolve(p):
+                try:
+                    if not p or not isinstance(p, str):
+                        return None
+                    abs_p = self._resolve_path(p)
+                    return abs_p if abs_p and os.path.exists(abs_p) else None
+                except Exception:
                     return None
-                abs_p = self._resolve_path(p)
-                return abs_p if abs_p and os.path.exists(abs_p) else None
+
+            # Load estate files
+            estate_data = load_json(estate_s)
+            for k in REQUIRED_E:
+                resolved = [safe_resolve(p) for p in (estate_data.get(k, []) or [])]
+                resolved = [p for p in resolved if p][:2]  # max 2 files
+                self.estate_files[k]["paths"] = resolved
+                self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+
+            # Load kilang files
+            kilang_data = load_json(kilang_s)
+            for k in REQUIRED_K:
+                resolved = [safe_resolve(p) for p in (kilang_data.get(k, []) or [])]
+                resolved = [p for p in resolved if p][:2]
+                self.kilang_files[k]["paths"] = resolved
+                self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+
+            # Load marks
+            e_marks = load_json(e_marks_s)
+            k_marks = load_json(k_marks_s)
+
+            # Build detail text
+            lines = [
+                f"Date: {date_s}",
+                f"Trip: {trip or '-'}",
+                f"Area / Place: {area_name} / {place_code}",
+                f"Car Plate: {car_plate or '-'}",
+                f"APDN (E2): {apdn or '-'}",
+                f"Seal E12: {seal_e12 or '-'}    Seal K3: {seal_k3 or '-'}",
+                f"Status: {status}",
+                f"Saved: {created}   Updated: {updated or '-'}",
+                "",
+                "Estate:"
+            ]
+            for k in REQUIRED_E:
+                lines.append(f"  {k}: {MARK_SYMBOL.get(e_marks.get(k, ''), '')} ({len(self.estate_files[k]['paths'])} files)")
+            lines.append("")
+            lines.append("Kilang:")
+            for k in REQUIRED_K:
+                lines.append(f"  {k}: {MARK_SYMBOL.get(k_marks.get(k, ''), '')} ({len(self.kilang_files[k]['paths'])} files)")
+            lines.append("")
+            lines.append("Remarks:")
+            lines.append(remarks or "-")
+
+            # Update detail text
+            self.detail_text.delete("0.0", "end")
+            self.detail_text.insert("0.0", "\n".join(lines))
+
+            # Scroll to top
+            try:
+                self.detail_text.yview_moveto(0.0)
             except Exception:
-                return None
+                pass
 
-        # Load estate files
-        estate_data = load_json(estate_s)
-        for k in REQUIRED_E:
-            resolved = [safe_resolve(p) for p in (estate_data.get(k, []) or [])]
-            resolved = [p for p in resolved if p][:2]  # max 2 files
-            self.estate_files[k]["paths"] = resolved
-            self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
-
-        # Load kilang files
-        kilang_data = load_json(kilang_s)
-        for k in REQUIRED_K:
-            resolved = [safe_resolve(p) for p in (kilang_data.get(k, []) or [])]
-            resolved = [p for p in resolved if p][:2]
-            self.kilang_files[k]["paths"] = resolved
-            self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
-
-        # Load marks
-        e_marks = load_json(e_marks_s)
-        k_marks = load_json(k_marks_s)
-
-        # Build detail text
-        lines = [
-            f"Date: {date_s}",
-            f"Trip: {trip or '-'}",
-            f"Area / Place: {area_name} / {place_code}",
-            f"Car Plate: {car_plate or '-'}",
-            f"APDN (E2): {apdn or '-'}",
-            f"Seal E12: {seal_e12 or '-'}    Seal K3: {seal_k3 or '-'}",
-            f"Status: {status}",
-            f"Saved: {created}   Updated: {updated or '-'}",
-            "",
-            "Estate:"
-        ]
-        for k in REQUIRED_E:
-            lines.append(f"  {k}: {MARK_SYMBOL.get(e_marks.get(k, ''), '')} ({len(self.estate_files[k]['paths'])} files)")
-        lines.append("")
-        lines.append("Kilang:")
-        for k in REQUIRED_K:
-            lines.append(f"  {k}: {MARK_SYMBOL.get(k_marks.get(k, ''), '')} ({len(self.kilang_files[k]['paths'])} files)")
-        lines.append("")
-        lines.append("Remarks:")
-        lines.append(remarks or "-")
-
-        # Update detail text
-        self.detail_text.delete("0.0", "end")
-        self.detail_text.insert("0.0", "\n".join(lines))
-
-        # Scroll to top
-        try:
-            self.detail_text.yview_moveto(0.0)
         except Exception:
-            pass
-
-    except Exception:
-        log_exc("_on_tree_select")
-        messagebox.showerror("Error", "Failed to show details. See log.")
-
+            log_exc("_on_tree_select")
+            messagebox.showerror("Error", "Failed to show details. See log.")
 
     def _edit_selected(self):
         """Open selected record for editing."""
