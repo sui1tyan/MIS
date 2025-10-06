@@ -27,7 +27,7 @@ except Exception as e:
 
 # try to import PIL for images (optional)
 try:
-    from PIL import Image
+    from PIL import Image, ImageTk
 except Exception:
     Image = None
 
@@ -1545,7 +1545,7 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         left.pack_propagate(False)
 
         try:
-            # Resolve correct image path (works both for script & bundled exe)
+            # Resolve correct image path (works for both script & bundled exe)
             if getattr(sys, "frozen", False):
                 base_path = sys._MEIPASS
             else:
@@ -1553,13 +1553,22 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
             logo_path = os.path.join(base_path, "SED_ICON.jpg")
 
             if os.path.exists(logo_path) and Image is not None:
+                # --- load and prepare image safely ---
                 img = Image.open(logo_path)
                 max_size = 280
-                img.thumbnail((max_size, max_size), Image.ANTIALIAS)
-                ctk_logo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                img.thumbnail((max_size, max_size))
+                # make a full in-memory copy (fixes PyInstaller blank image bug)
+                img_copy = img.copy()
+
+                # create CTkImage using memory-safe copy
+                ctk_logo = ctk.CTkImage(
+                    light_image=img_copy,
+                    dark_image=img_copy,
+                    size=img_copy.size
+                )
 
                 logo_widget = ctk.CTkLabel(left, image=ctk_logo, text="")
-                logo_widget.image = ctk_logo
+                logo_widget.image = ctk_logo  # prevent garbage collection
                 logo_widget.pack(expand=True, fill="both", padx=10, pady=10)
             else:
                 raise FileNotFoundError(logo_path)
@@ -1572,6 +1581,7 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
                 font=roboto(18, "bold"),
                 justify="center"
             ).pack(expand=True, fill="both")
+
 
         # Right side content
         right = ctk.CTkFrame(main_frame)
