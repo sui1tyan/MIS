@@ -1,6 +1,6 @@
 # (Full updated GTS_Summary.py contents)
 # -- BEGIN updated file -----------------------------------------------------
-import os, sys
+import os, sys, tempfile, atexit
 import json, sqlite3
 import datetime, time
 import logging, traceback
@@ -8,13 +8,14 @@ import shutil
 import hashlib
 import tkinter as tk
 import tempfile
+import atexit
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 from contextlib import contextmanager
 
 # ---------------- cleanup stale _MEI folders ----------------
 try:
-    import tempfile, shutil
+    import shutil
 
     temp_dir = tempfile.gettempdir()
     for name in os.listdir(temp_dir):
@@ -35,58 +36,37 @@ except Exception as e:
 
 # ---------------- prevent multiple instances ----------------
 try:
-    import psutil
-    import os, sys
+    LOCK_PATH = os.path.join(tempfile.gettempdir(), "GTS_summary.lock")
 
-    def _ensure_single_instance():
-        this_pid = os.getpid()
-        this_exe = os.path.abspath(sys.executable).lower()
-        exe_name = os.path.basename(this_exe)
-
-        for proc in psutil.process_iter(['pid', 'exe', 'cmdline']):
+    # If file exists and the process inside it is still running, block
+    if os.path.exists(LOCK_PATH):
+        try:
+            with open(LOCK_PATH, "r") as f:
+                pid = int(f.read().strip() or 0)
+            import psutil
+            if psutil.pid_exists(pid):
+                import tkinter.messagebox as mbox
+                mbox.showwarning("Already running", "GTS is already running.\nPlease close the existing window first.")
+                sys.exit(0)
+        except Exception:
+            # file corrupted or unreadable — just remove it
             try:
-                pid = proc.info['pid']
-                if pid == this_pid:
-                    continue  # skip myself
+                os.remove(LOCK_PATH)
+            except Exception:
+                pass
 
-                exe_path = (proc.info.get('exe') or '').lower()
-                cmdline = " ".join(proc.info.get('cmdline') or []).lower()
+    # Write current process ID
+    with open(LOCK_PATH, "w") as f:
+        f.write(str(os.getpid()))
 
-                # skip empty or zombie processes
-                if not exe_path or not os.path.exists(exe_path):
-                    continue
-
-                # skip if process is a child of current process (PyInstaller bootstrap)
-                try:
-                    if proc.ppid() == this_pid:
-                        continue
-                except Exception:
-                    pass
-
-                # only count it as duplicate if both name and directory match exactly
-                if (
-                    os.path.basename(exe_path) == exe_name
-                    and os.path.dirname(exe_path) == os.path.dirname(this_exe)
-                ):
-                    return False
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-
-        return True
-
-    try:
-        import time
-        time.sleep(2)
-    except Exception:
-        pass
-
-    if not _ensure_single_instance():
-        import tkinter.messagebox as _mbox
-        _mbox.showwarning(
-            "Already running",
-            "GTS is already running.\nPlease close the existing window first."
-        )
-        os._exit(0)
+    # Auto-remove lock file on exit
+    def _cleanup_lock():
+        try:
+            if os.path.exists(LOCK_PATH):
+                os.remove(LOCK_PATH)
+        except Exception:
+            pass
+    atexit.register(_cleanup_lock)
 
 except Exception as e:
     print("Single-instance guard failed:", e)
