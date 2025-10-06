@@ -1,19 +1,32 @@
 # (Full updated GTS_Summary.py contents)
 # -- BEGIN updated file -----------------------------------------------------
-import os
-import sys
-import json
-import sqlite3
-import datetime
-import logging
-import traceback
+import os, sys, psutil
+import json, sqlite3
+import datetime, time
+import logging, traceback
 import shutil
 import hashlib
-import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 from contextlib import contextmanager
+
+# ---- Ensure Single Instance Only ----
+def _ensure_single_instance():
+    this_pid = os.getpid()
+    this_name = os.path.basename(sys.argv[0]).lower()
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            if proc.info['pid'] != this_pid and this_name in proc.info['name'].lower():
+                return False
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return True
+
+if not _ensure_single_instance():
+    import tkinter.messagebox as mbox
+    mbox.showwarning("Already running", "GTS is already running. Please close it first.")
+    sys.exit(0)
 
 # ---- Ed25519 verification ----
 from cryptography.hazmat.primitives import serialization
