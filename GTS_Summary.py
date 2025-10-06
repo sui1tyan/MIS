@@ -1,6 +1,6 @@
 # (Full updated GTS_Summary.py contents)
 # -- BEGIN updated file -----------------------------------------------------
-import os, sys, psutil
+import os, sys
 import json, sqlite3
 import datetime, time
 import logging, traceback
@@ -11,22 +11,27 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 from contextlib import contextmanager
 
-# ---- Ensure Single Instance Only ----
-def _ensure_single_instance():
-    this_pid = os.getpid()
-    this_name = os.path.basename(sys.argv[0]).lower()
-    for proc in psutil.process_iter(['pid', 'name']):
-        try:
-            if proc.info['pid'] != this_pid and this_name in proc.info['name'].lower():
-                return False
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    return True
+# ---------------- prevent multiple instances ----------------
+try:
+    import psutil
+    def _ensure_single_instance():
+        this_pid = os.getpid()
+        this_name = os.path.basename(sys.argv[0]).lower()
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if proc.info['pid'] != this_pid and this_name in (proc.info['name'] or '').lower():
+                    return False
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return True
 
-if not _ensure_single_instance():
-    import tkinter.messagebox as mbox
-    mbox.showwarning("Already running", "GTS is already running. Please close it first.")
-    sys.exit(0)
+    if not _ensure_single_instance():
+        import tkinter.messagebox as _mbox
+        _mbox.showwarning("Already running", "GTS is already running.\nPlease close the existing window first.")
+        sys.exit(0)
+except Exception as e:
+    # fail-safe: even if psutil fails, don't block the app
+    print("Single-instance guard failed:", e)
 
 # ---- Ed25519 verification ----
 from cryptography.hazmat.primitives import serialization
