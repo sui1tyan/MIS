@@ -1539,33 +1539,35 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         main_frame = ctk.CTkFrame(login)
         main_frame.pack(fill="both", expand=True, padx=12, pady=12)
 
-        # Left: logo
-        left = ctk.CTkFrame(main_frame, width=260)
-        left.pack(side="left", fill="y", padx=(4,8), pady=4)
+        # Left: image panel
+        left = ctk.CTkFrame(main_frame, width=280)
+        left.pack(side="left", fill="both", padx=(4,8), pady=4)
         left.pack_propagate(False)
 
-        # Right: PIN entry
-        right = ctk.CTkFrame(main_frame)
-        right.pack(side="left", fill="both", expand=True, padx=(8,4), pady=4)
-
-        # load logo image if possible
-        logo_found = _find_logo_image()
-        logo_widget = _find_logo_image()
-        if logo_found and Image is not None:
-            try:
-                img = Image.open(logo_found)
-                # make it fit nicely (square-ish)
-                max_size = 220
+        try:
+            # Load your SED image
+            logo_path = os.path.join(APP_DIR, "SED_ICON.jpg")
+            if os.path.exists(logo_path) and Image is not None:
+                img = Image.open(logo_path)
+                # Resize to fit nicely in the panel
+                max_size = 280
                 img.thumbnail((max_size, max_size), Image.ANTIALIAS)
-                ctk_logo = ctk.CTkImage(light_image=img, size=img.size)
-                logo_widget = ctk.CTkLabel(left, image=ctk_logo, text="")
-                logo_widget.image = ctk_logo
-                logo_widget.pack(expand=True)
-            except Exception:
-                logo_widget = None
+                ctk_logo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
 
-        if logo_widget is None:
-            ctk.CTkLabel(left, text="SECURITY &\nENFORCEMENT", font=roboto(16, "bold")).pack(expand=True)
+                logo_widget = ctk.CTkLabel(left, image=ctk_logo, text="")
+                logo_widget.image = ctk_logo  # prevent garbage collection
+                logo_widget.pack(expand=True, fill="both", padx=10, pady=10)
+            else:
+                raise FileNotFoundError
+
+        except Exception:
+            # Fallback text if image not found
+            ctk.CTkLabel(
+                left,
+                text="SECURITY &\nENFORCEMENT",
+                font=roboto(18, "bold"),
+                justify="center"
+            ).pack(expand=True, fill="both")
 
         # Right side content
         ctk.CTkLabel(right, text="GTS — Admin Login", font=roboto(18, "bold")).pack(anchor="w", pady=(12,6), padx=6)
