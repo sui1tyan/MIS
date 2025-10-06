@@ -1550,7 +1550,7 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
 
         # load logo image if possible
         logo_found = _find_logo_image()
-        logo_widget = _find_logo_imag()
+        logo_widget = _find_logo_image()
         if logo_found and Image is not None:
             try:
                 img = Image.open(logo_found)
