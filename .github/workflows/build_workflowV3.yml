@@ -32,7 +32,7 @@ jobs:
 
       - name: Build GTS_LG (Windows)
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name GTS_LG GTS_LG_GUI.py
+          pyinstaller --noconfirm --onefile --windowed --name GTS_LG GTS_LG_GUI.py --icon=SED_ICON.ico
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
