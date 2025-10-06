@@ -36,27 +36,59 @@ except Exception as e:
 # ---------------- prevent multiple instances ----------------
 try:
     import psutil
+    import os, sys
+
     def _ensure_single_instance():
         this_pid = os.getpid()
-        exe_name = os.path.basename(sys.executable).lower()
+        this_exe = os.path.abspath(sys.executable).lower()
+        exe_name = os.path.basename(this_exe)
 
-        for proc in psutil.process_iter(['pid', 'exe']):
+        for proc in psutil.process_iter(['pid', 'exe', 'cmdline']):
             try:
-                if proc.info['pid'] == this_pid:
+                pid = proc.info['pid']
+                if pid == this_pid:
+                    continue  # skip myself
+
+                exe_path = (proc.info.get('exe') or '').lower()
+                cmdline = " ".join(proc.info.get('cmdline') or []).lower()
+
+                # skip empty or zombie processes
+                if not exe_path or not os.path.exists(exe_path):
                     continue
-                other_exe = (proc.info.get('exe') or '').lower()
-                if other_exe.endswith(exe_name):
+
+                # skip if process is a child of current process (PyInstaller bootstrap)
+                try:
+                    if proc.ppid() == this_pid:
+                        continue
+                except Exception:
+                    pass
+
+                # only count it as duplicate if both name and directory match exactly
+                if (
+                    os.path.basename(exe_path) == exe_name
+                    and os.path.dirname(exe_path) == os.path.dirname(this_exe)
+                ):
                     return False
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+
         return True
+
+    try:
+        import time
+        time.sleep(0.4)
+    except Exception:
+        pass
 
     if not _ensure_single_instance():
         import tkinter.messagebox as _mbox
-        _mbox.showwarning("Already running", "GTS is already running.\nPlease close the existing window first.")
+        _mbox.showwarning(
+            "Already running",
+            "GTS is already running.\nPlease close the existing window first."
+        )
         os._exit(0)
+
 except Exception as e:
-    # fail-safe: even if psutil fails, don't block the app
     print("Single-instance guard failed:", e)
 
 # ---- Ed25519 verification ----
