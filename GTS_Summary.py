@@ -7,19 +7,45 @@ import logging, traceback
 import shutil
 import hashlib
 import tkinter as tk
+import tempfile
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 from contextlib import contextmanager
+
+# ---------------- cleanup stale _MEI folders ----------------
+try:
+    import tempfile, shutil
+
+    temp_dir = tempfile.gettempdir()
+    for name in os.listdir(temp_dir):
+        if name.startswith("_MEI") and len(name) > 8:
+            path = os.path.join(temp_dir, name)
+            try:
+                # check if directory looks like a PyInstaller unpack dir
+                if os.path.isdir(path):
+                    # skip current running _MEIPASS (used by this exe)
+                    if hasattr(sys, "_MEIPASS") and os.path.samefile(sys._MEIPASS, path):
+                        continue
+                    # try remove quietly
+                    shutil.rmtree(path, ignore_errors=True)
+            except Exception:
+                pass
+except Exception as e:
+    print("Cleanup of stale _MEI folders failed:", e)
 
 # ---------------- prevent multiple instances ----------------
 try:
     import psutil
     def _ensure_single_instance():
         this_pid = os.getpid()
-        this_name = os.path.basename(sys.argv[0]).lower()
-        for proc in psutil.process_iter(['pid', 'name']):
+        exe_name = os.path.basename(sys.executable).lower()
+
+        for proc in psutil.process_iter(['pid', 'exe']):
             try:
-                if proc.info['pid'] != this_pid and this_name in (proc.info['name'] or '').lower():
+                if proc.info['pid'] == this_pid:
+                    continue
+                other_exe = (proc.info.get('exe') or '').lower()
+                if other_exe.endswith(exe_name):
                     return False
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -28,7 +54,7 @@ try:
     if not _ensure_single_instance():
         import tkinter.messagebox as _mbox
         _mbox.showwarning("Already running", "GTS is already running.\nPlease close the existing window first.")
-        sys.exit(0)
+        os._exit(0)
 except Exception as e:
     # fail-safe: even if psutil fails, don't block the app
     print("Single-instance guard failed:", e)
