@@ -1570,6 +1570,8 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
             ).pack(expand=True, fill="both")
 
         # Right side content
+        right = ctk.CTkFrame(main_frame)
+        right.pack(side="left", fill="both", expand=True, padx=(8,4), pady=4)
         ctk.CTkLabel(right, text="GTS — Admin Login", font=roboto(18, "bold")).pack(anchor="w", pady=(12,6), padx=6)
         ctk.CTkLabel(right, text="Enter Admin PIN to continue", font=roboto(11)).pack(anchor="w", padx=6)
 
