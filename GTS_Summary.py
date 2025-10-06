@@ -1364,101 +1364,105 @@ class GTSApp(ctk.CTk):
             messagebox.showerror("Error", "Failed to open record for editing.")
 
     def _on_tree_select(self, event):
-        sel = self.tree.selection()
-        if not sel: return
-        rid = int(sel[0])
+        """Display selected record's details in the detail panel safely."""
         try:
-            rid = int(sel[0])
-            
-            with db_cursor() as cur:
-                cur.execute("""
-                    SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
-                           estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
-                    FROM gts_records WHERE id = ?
-                """, (rid,))
-                r = cur.fetchone()
-            if not r: 
+            sel = self.tree.selection()
+            if not sel:
+                return
+            try:
+                rid = int(sel[0])
+            except Exception:
                 return
 
-            (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
-             estate_s, kilang_s, e_marks_s, k_marks_s,
-             remarks, status, created, updated) = r
+        # Fetch record from DB
+        with db_cursor() as cur:
+            cur.execute("""
+                SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
+                       estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
+                FROM gts_records WHERE id = ?
+            """, (rid,))
+            r = cur.fetchone()
+        if not r:
+            return
 
-            with db_cursor() as cur:
-                cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
-                area_name = (cur.fetchone() or ["-"])[0]
-                cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
-                place_code = (cur.fetchone() or ["-"])[0]
+        (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
+         estate_s, kilang_s, e_marks_s, k_marks_s,
+         remarks, status, created, updated) = r
 
-            # Load estate and kilang data safely
-            estate_data = load_json(estate_s)
-            kilang_data = load_json(kilang_s)
-            for k in REQUIRED_E:
-                estate_data[k] = [
-                    self._resolve_path(p) for p in (estate_data.get(k, []) or [])
-                    if isinstance(p, str) and os.path.exists(self._resolve_path(p))
-                ][:2]
+        # Get area and place names
+        with db_cursor() as cur:
+            cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+            area_name = (cur.fetchone() or ["-"])[0]
+            cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
+            place_code = (cur.fetchone() or ["-"])[0]
 
-            for k in REQUIRED_K:
-                kilang_data[k] = [
-                    self._resolve_path(p) for p in (kilang_data.get(k, []) or [])
-                    if isinstance(p, str) and os.path.exists(self._resolve_path(p))
-                ][:2]
-
-            # Load marks
-            e_marks = load_json(e_marks_s)
-            k_marks = load_json(k_marks_s)
-
-            estate_data = {
-                k: [
-                    p for p in (estate_data.get(k, []) or [])
-                    if os.path.exists(self._resolve_path(p))
-                ]
-                for k in REQUIRED_E
-            }
-        
-            kilang_data = {
-                k: [
-                    p for p in (kilang_data.get(k, []) or [])
-                    if os.path.exists(self._resolve_path(p))
-                ]
-                for k in REQUIRED_K
-            }
-            
-            e_marks = load_json(e_marks_s)
-            k_marks = load_json(k_marks_s)
-
-            lines = [
-                f"Date: {date_s}",
-                f"Trip: {trip or '-'}",
-                f"Area / Place: {area_name} / {place_code}",
-                f"Car Plate: {car_plate or '-'}",
-                f"APDN (E2): {apdn or '-'}",
-                f"Seal E12: {seal_e12 or '-'}    Seal K3: {seal_k3 or '-'}",
-                f"Status: {status}",
-                f"Saved: {created}   Updated: {updated or '-'}",
-                ""
-            ]
-            lines.append("Estate:")
-            for k in REQUIRED_E:
-                lines.append(f"  {k}: {MARK_SYMBOL.get(e_marks.get(k, ''), '')} ({len(estate_data.get(k, []))} files)")
-            lines.append("")
-            lines.append("Kilang:")
-            for k in REQUIRED_K:
-                lines.append(f"  {k}: {MARK_SYMBOL.get(k_marks.get(k, ''), '')} ({len(kilang_data.get(k, []))} files)")
-            lines.append("")
-            lines.append("Remarks:"); lines.append(remarks or "-")
-
-            self.detail_text.delete("0.0", "end")
-            self.detail_text.insert("0.0", "\n".join(lines))
-            # ensure detail_text is scrolled to top when record selected
+        # Safe path resolver
+        def safe_resolve(p):
             try:
-                self.detail_text.yview_moveto(0.0)
+                if not p or not isinstance(p, str):
+                    return None
+                abs_p = self._resolve_path(p)
+                return abs_p if abs_p and os.path.exists(abs_p) else None
             except Exception:
-                pass
+                return None
+
+        # Load estate files
+        estate_data = load_json(estate_s)
+        for k in REQUIRED_E:
+            resolved = [safe_resolve(p) for p in (estate_data.get(k, []) or [])]
+            resolved = [p for p in resolved if p][:2]  # max 2 files
+            self.estate_files[k]["paths"] = resolved
+            self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+
+        # Load kilang files
+        kilang_data = load_json(kilang_s)
+        for k in REQUIRED_K:
+            resolved = [safe_resolve(p) for p in (kilang_data.get(k, []) or [])]
+            resolved = [p for p in resolved if p][:2]
+            self.kilang_files[k]["paths"] = resolved
+            self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+
+        # Load marks
+        e_marks = load_json(e_marks_s)
+        k_marks = load_json(k_marks_s)
+
+        # Build detail text
+        lines = [
+            f"Date: {date_s}",
+            f"Trip: {trip or '-'}",
+            f"Area / Place: {area_name} / {place_code}",
+            f"Car Plate: {car_plate or '-'}",
+            f"APDN (E2): {apdn or '-'}",
+            f"Seal E12: {seal_e12 or '-'}    Seal K3: {seal_k3 or '-'}",
+            f"Status: {status}",
+            f"Saved: {created}   Updated: {updated or '-'}",
+            "",
+            "Estate:"
+        ]
+        for k in REQUIRED_E:
+            lines.append(f"  {k}: {MARK_SYMBOL.get(e_marks.get(k, ''), '')} ({len(self.estate_files[k]['paths'])} files)")
+        lines.append("")
+        lines.append("Kilang:")
+        for k in REQUIRED_K:
+            lines.append(f"  {k}: {MARK_SYMBOL.get(k_marks.get(k, ''), '')} ({len(self.kilang_files[k]['paths'])} files)")
+        lines.append("")
+        lines.append("Remarks:")
+        lines.append(remarks or "-")
+
+        # Update detail text
+        self.detail_text.delete("0.0", "end")
+        self.detail_text.insert("0.0", "\n".join(lines))
+
+        # Scroll to top
+        try:
+            self.detail_text.yview_moveto(0.0)
         except Exception:
-            log_exc("_on_tree_select")
-            messagebox.showerror("Error", "Failed to show details. See log.")
+            pass
+
+    except Exception:
+        log_exc("_on_tree_select")
+        messagebox.showerror("Error", "Failed to show details. See log.")
+
 
     def _edit_selected(self):
         """Open selected record for editing."""
@@ -1471,6 +1475,7 @@ class GTSApp(ctk.CTk):
         self._open_for_edit(rid)
 
     def _open_for_edit(self, rid):
+        """Open selected record for editing safely."""
         try:
             with db_cursor() as cur:
                 cur.execute("""
@@ -1480,84 +1485,93 @@ class GTSApp(ctk.CTk):
                 """, (rid,))
                 row = cur.fetchone()
             if not row:
-                messagebox.showerror("Not found", "Record not found."); return
+                messagebox.showerror("Not found", "Record not found.")
+                return
 
-            (_id, date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
-             estate_s, kilang_s, e_marks_s, k_marks_s, remarks) = row
+        (_id, date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
+         estate_s, kilang_s, e_marks_s, k_marks_s, remarks) = row
 
-            self.editing_id = rid
-            self.cr_date.set(date_s or datetime.date.today().isoformat())
-            self.cr_apdn_e2.set(apdn or "")
-            self.cr_seal_e12.set(seal_e12 or "")
-            self.cr_seal_k3.set(seal_k3 or "")
+        self.editing_id = rid
+        self.cr_date.set(date_s or datetime.date.today().isoformat())
+        self.cr_apdn_e2.set(apdn or "")
+        self.cr_seal_e12.set(seal_e12 or "")
+        self.cr_seal_k3.set(seal_k3 or "")
 
-            if trip:
-                parts = trip.split("/")
-                if len(parts) == 3:
-                    _, trip_num, car_plate_str = parts
-                    self.cr_trip.set(trip_num)
-                    self.cr_car_plate.set(car_plate_str)
-                elif len(parts) == 2:
-                    _, trip_num = parts
-                    self.cr_trip.set(trip_num)
-                    self.cr_car_plate.set(car_plate or "")
-                else:
-                    self.cr_trip.set(trip)
-                    self.cr_car_plate.set(car_plate or "")
-            else:
-                self.cr_trip.set("")
+        # Parse trip number and car plate safely
+        if trip:
+            parts = trip.split("/")
+            if len(parts) == 3:
+                _, trip_num, car_plate_str = parts
+                self.cr_trip.set(trip_num)
+                self.cr_car_plate.set(car_plate_str)
+            elif len(parts) == 2:
+                _, trip_num = parts
+                self.cr_trip.set(trip_num)
                 self.cr_car_plate.set(car_plate or "")
+            else:
+                self.cr_trip.set(trip)
+                self.cr_car_plate.set(car_plate or "")
+        else:
+            self.cr_trip.set("")
+            self.cr_car_plate.set(car_plate or "")
 
-            with db_cursor() as cur:
-                cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
-                area_name = (cur.fetchone() or [""])[0]
-                self.cr_area_box.configure(values=self._load_area_names())
-                self.cr_area_var.set(area_name)
-                self.cr_area_box.set(area_name)
-                self._reload_places_box()
-                cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
-                pc = (cur.fetchone() or [""])[0]
-            self.cr_place_var.set(pc)
-            self.cr_place_box.set(pc)
+        # Load area and place safely
+        with db_cursor() as cur:
+            cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+            area_name = (cur.fetchone() or [""])[0]
+            self.cr_area_box.configure(values=self._load_area_names())
+            self.cr_area_var.set(area_name)
+            self.cr_area_box.set(area_name)
 
-            self.cr_remarks.delete("0.0", "end")
-            self.cr_remarks.insert("0.0", remarks or "")
+            self._reload_places_box()
+            cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
+            pc = (cur.fetchone() or [""])[0]
+        self.cr_place_var.set(pc)
+        self.cr_place_box.set(pc)
 
-            e_marks = load_json(e_marks_s); k_marks = load_json(k_marks_s)
-            for k in REQUIRED_E: self.estate_marks[k].set(e_marks.get(k, ""))
-            for k in REQUIRED_K: self.kilang_marks[k].set(k_marks.get(k, ""))
+        # Remarks
+        self.cr_remarks.delete("0.0", "end")
+        self.cr_remarks.insert("0.0", remarks or "")
 
-            estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
-    
-            for k in REQUIRED_E:
-                resolved = []
-                for p in (estate_data.get(k, []) or []):
-                    if not isinstance(p, str): 
-                        continue
-                    rp = self._resolve_path(p)
-                    if rp and os.path.exists(rp):
-                        resolved.append(rp)
-                resolved = resolved[:2]
-                self.estate_files[k]["paths"] = resolved
-                self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+        # Load marks
+        e_marks = load_json(e_marks_s)
+        k_marks = load_json(k_marks_s)
+        for k in REQUIRED_E: self.estate_marks[k].set(e_marks.get(k, ""))
+        for k in REQUIRED_K: self.kilang_marks[k].set(k_marks.get(k, ""))
 
-            for k in REQUIRED_K:
-                resolved = []
-                for p in (kilang_data.get(k, []) or []):
-                    if not isinstance(p, str):
-                        continue
-                    rp = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
-                    if os.path.exists(rp):
-                        resolved.append(rp)
-                resolved = resolved[:2]
-                self.kilang_files[k]["paths"] = resolved
-                self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+        # Load estate files safely
+        estate_data = load_json(estate_s)
+        for k in REQUIRED_E:
+            resolved = []
+            for p in estate_data.get(k, []) or []:
+                if not isinstance(p, str):
+                    continue
+                abs_p = self._resolve_path(p)
+                if abs_p and os.path.exists(abs_p):
+                    resolved.append(abs_p)
+            self.estate_files[k]["paths"] = resolved[:2]  # max 2
+            self.estate_files[k]["count_widget"].configure(text=f"{len(resolved[:2])} files")
 
-            # show create tab and ensure top
-            self._show_create_tab()
-            self._update_save_warning()
-        except Exception:
-            log_exc("_open_for_edit"); messagebox.showerror("Error", "Failed to open record for edit. See log.")
+        # Load kilang files safely
+        kilang_data = load_json(kilang_s)
+        for k in REQUIRED_K:
+            resolved = []
+            for p in kilang_data.get(k, []) or []:
+                if not isinstance(p, str):
+                    continue
+                abs_p = self._resolve_path(p)
+                if abs_p and os.path.exists(abs_p):
+                    resolved.append(abs_p)
+            self.kilang_files[k]["paths"] = resolved[:2]
+            self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved[:2])} files")
+
+        # Show create tab
+        self._show_create_tab()
+        self._update_save_warning()
+
+    except Exception:
+        log_exc("_open_for_edit")
+        messagebox.showerror("Error", "Failed to open record for edit. See log.")
 
     def _delete_selected(self):
         sel = self.tree.selection()
@@ -1620,7 +1634,7 @@ class GTSApp(ctk.CTk):
 
     # ---------- tab navigation helpers ----------
     def _show_create_tab(self):
-        """Switch to Create tab and ensure the UI is reset and paths are normalized."""
+        """Switch to Create tab and safely normalize paths."""
         try:
             self.tabview.set("Create Record")
 
@@ -1631,7 +1645,7 @@ class GTSApp(ctk.CTk):
             except Exception:
                 pass
 
-            # Normalize current paths for all estate/kilang files
+            # Helper: normalize paths safely
             def normalize_paths(files_dict):
                 for k, data in files_dict.items():
                     paths = data.get("paths", [])
@@ -1640,15 +1654,15 @@ class GTSApp(ctk.CTk):
                         if not p or not isinstance(p, str):
                             continue
                         abs_p = self._resolve_path(p)
-                        if os.path.exists(abs_p):
+                        if abs_p and os.path.exists(abs_p):
                             normalized.append(abs_p)
-                    data["paths"] = normalized
-                    data["count_widget"].configure(text=f"{len(normalized)} files")
+                    data["paths"] = normalized[:2]  # keep max 2
+                    data["count_widget"].configure(text=f"{len(normalized[:2])} files")
 
             normalize_paths(self.estate_files)
             normalize_paths(self.kilang_files)
 
-            # Reset marks UI warning
+            # Update save warning
             self._update_save_warning()
 
         except Exception:
