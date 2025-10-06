@@ -24,7 +24,7 @@ jobs:
       - name: Install build deps
         run: |
           python -m pip install --upgrade pip wheel setuptools
-          python -m pip install pyinstaller customtkinter cryptography pillow
+          python -m pip install pyinstaller customtkinter cryptography pillow psutil
 
       - name: Build GTS_Summary (Windows)
         run: |
