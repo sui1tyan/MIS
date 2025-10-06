@@ -290,7 +290,7 @@ def copy_images_to_store(paths, label, dest_dir):
             fname = f"{label}_{idx}_{ts}{base_ext}"
             dest = os.path.join(dest_dir, fname)
             shutil.copy2(p, dest)
-            saved.append(dest)
+            saved.append(os.path.relpath(dest, IMG_STORE))
         except Exception:
             log_exc(f"copy image failed for {p}")
     # de-dup
@@ -1294,7 +1294,8 @@ class GTSApp(ctk.CTk):
                     FROM gts_records WHERE id = ?
                 """, (rid,))
                 r = cur.fetchone()
-            if not r: return
+            if not r: 
+                return
 
             (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
              estate_s, kilang_s, e_marks_s, k_marks_s,
@@ -1306,11 +1307,32 @@ class GTSApp(ctk.CTk):
                 cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
                 place_code = (cur.fetchone() or ["-"])[0]
 
-            estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
-            estate_data = {k: [p for p in (estate_data.get(k, []) or []) if os.path.exists(p)] for k in REQUIRED_E}
-            kilang_data = {k: [p for p in (kilang_data.get(k, []) or []) if os.path.exists(p)] for k in REQUIRED_K}
+            estate_data = load_json(estate_s)
+            kilang_data = load_json(kilang_s)
+
+            def _resolve_path(p):
+                """Return absolute path (resolve relative ones inside IMG_STORE)."""
+                if not p:
+                    return None
+                return os.path.join(IMG_STORE, p) if not os.path.isabs(p) else p
+
+            estate_data = {
+                k: [
+                    p for p in (estate_data.get(k, []) or [])
+                    if os.path.exists(_resolve_path(p))
+                ]
+                for k in REQUIRED_E
+            }
+            kilang_data = {
+                k: [
+                    p for p in (kilang_data.get(k, []) or [])
+                    if os.path.exists(_resolve_path(p))
+                ]
+                for k in REQUIRED_K
+            }
             
-            e_marks = load_json(e_marks_s);    k_marks = load_json(k_marks_s)
+            e_marks = load_json(e_marks_s)
+            k_marks = load_json(k_marks_s)
 
             lines = [
                 f"Date: {date_s}",
@@ -1341,7 +1363,8 @@ class GTSApp(ctk.CTk):
             except Exception:
                 pass
         except Exception:
-            log_exc("_on_tree_select"); messagebox.showerror("Error", "Failed to show details. See log.")
+            log_exc("_on_tree_select")
+            messagebox.showerror("Error", "Failed to show details. See log.")
 
     def _edit_selected(self):
         sel = self.tree.selection()
