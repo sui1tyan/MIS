@@ -1545,23 +1545,27 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
         left.pack_propagate(False)
 
         try:
-            # Load your SED image
-            logo_path = os.path.join(APP_DIR, "SED_ICON.jpg")
+            # Resolve correct image path (works both for script & bundled exe)
+            if getattr(sys, "frozen", False):
+                base_path = sys._MEIPASS
+            else:
+                base_path = APP_DIR
+            logo_path = os.path.join(base_path, "SED_ICON.jpg")
+
             if os.path.exists(logo_path) and Image is not None:
                 img = Image.open(logo_path)
-                # Resize to fit nicely in the panel
                 max_size = 280
                 img.thumbnail((max_size, max_size), Image.ANTIALIAS)
                 ctk_logo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
 
                 logo_widget = ctk.CTkLabel(left, image=ctk_logo, text="")
-                logo_widget.image = ctk_logo  # prevent garbage collection
+                logo_widget.image = ctk_logo
                 logo_widget.pack(expand=True, fill="both", padx=10, pady=10)
             else:
-                raise FileNotFoundError
+                raise FileNotFoundError(logo_path)
 
-        except Exception:
-            # Fallback text if image not found
+        except Exception as e:
+            print("Logo load failed:", e)
             ctk.CTkLabel(
                 left,
                 text="SECURITY &\nENFORCEMENT",
