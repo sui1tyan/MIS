@@ -1120,35 +1120,35 @@ class GTSApp(ctk.CTk):
             log_exc("_save_record")
             messagebox.showerror("Error", "Failed to save record. See log.")
 
-   def _cleanup_removed(self, prev_map, new_map):
-        """
-        Remove any files that were previously in prev_map but no longer exist in new_map.
-        Only deletes files under IMG_STORE.
-        """
-        try:
-            prev_map = prev_map or {}
-            new_map = new_map or {}
+        def _cleanup_removed(self, prev_map, new_map):
+            """
+            Remove any files that were previously in prev_map but no longer exist in new_map.
+            Only deletes files under IMG_STORE.
+            """
+            try:
+                prev_map = prev_map or {}
+                new_map = new_map or {}
 
-            for key, prev_list in prev_map.items():
-                # Build set of absolute paths that should be kept
-                keep_set = set()
-                for np in new_map.get(key, []):
-                    if not np or not isinstance(np, str):
-                        continue
-                    abs_np = self._resolve_path(np)
-                    keep_set.add(abs_np)
+                for key, prev_list in prev_map.items():
+                    # Build set of absolute paths that should be kept
+                    keep_set = set()
+                    for np in new_map.get(key, []):
+                        if not np or not isinstance(np, str):
+                            continue
+                        abs_np = self._resolve_path(np)
+                        keep_set.add(abs_np)
 
-                # Iterate previous paths and delete if not in keep_set
-                for p in prev_list or []:
-                    if not p or not isinstance(p, str):
-                        continue
-                    abs_prev = self._resolve_path(p)
-                    if abs_prev not in keep_set:
-                        # Only delete if it is under IMG_STORE
-                        self._delete_if_under_store(abs_prev)
+                    # Iterate previous paths and delete if not in keep_set
+                    for p in prev_list or []:
+                        if not p or not isinstance(p, str):
+                            continue
+                        abs_prev = self._resolve_path(p)
+                        if abs_prev not in keep_set:
+                            # Only delete if it is under IMG_STORE
+                            self._delete_if_under_store(abs_prev)
 
-        except Exception:
-            log_exc("_cleanup_removed")
+            except Exception:
+                log_exc("_cleanup_removed")
 
     # ---------- Create reset lower section ----------
     def _reset_lower_section(self):
