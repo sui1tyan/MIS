@@ -1685,10 +1685,6 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
                 result["ok"] = True
                 # success animation then destroy
                 try:
-                    _fade_out_window(login, ms=200)
-                except Exception:
-                    pass
-                try:
                     login.destroy()
                 except Exception:
                     pass
