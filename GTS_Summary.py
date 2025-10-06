@@ -9,6 +9,7 @@ import logging
 import traceback
 import shutil
 import hashlib
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
@@ -23,6 +24,16 @@ try:
     import customtkinter as ctk
 except Exception as e:
     raise RuntimeError("customtkinter required. Install: pip install customtkinter") from e
+
+# try to import PIL for images (optional)
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
+# ---------------- icon / logo names ----------------
+ICON_ICO_NAME = "SED_ICON.ico"
+ICON_IMG_NAME = "SED_ICON.jpg"  # your uploaded image name
 
 # ---------------- paths (keep everything beside the app) ----------------
 if getattr(sys, "frozen", False):
@@ -336,6 +347,48 @@ class DoubleScrollableFrame(ctk.CTkFrame):
             except Exception:
                 pass
 
+# ---------- small helpers for animation & assets ----------
+def _fade_in_window(win, ms=300, steps=10):
+    """Fade in window from alpha 0 -> 1 over ms milliseconds (best-effort)."""
+    try:
+        win.attributes("-alpha", 0.0)
+    except Exception:
+        return
+    delay = ms / max(1, steps) / 1000.0
+    for i in range(steps + 1):
+        try:
+            win.attributes("-alpha", i / steps)
+            win.update()
+            time.sleep(delay)
+        except Exception:
+            pass
+
+def _fade_out_window(win, ms=300, steps=10):
+    """Fade out window from alpha 1 -> 0."""
+    try:
+        for i in range(steps, -1, -1):
+            try:
+                win.attributes("-alpha", i / steps)
+                win.update()
+                time.sleep(ms / max(1, steps) / 1000.0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _find_logo_image():
+    candidates = [
+        os.path.join(APP_DIR, ICON_IMG_NAME),
+        os.path.join(APP_DIR, "SED_ICON.png"),
+        os.path.join(APP_DIR, "sed_icon.jpg"),
+        os.path.join(APP_DIR, "logo.png"),
+        "/mnt/data/SED_ICON.jpg",  # fallback for the environment where you uploaded
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return None
+
 # ---------------- Main App ----------------
 class GTSApp(ctk.CTk):
     def __init__(self):
@@ -346,6 +399,19 @@ class GTSApp(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
         self.after(100, lambda: self.state('zoomed'))
+
+        # set window icon if present (Windows .ico)
+        try:
+            ico_path = os.path.join(APP_DIR, ICON_ICO_NAME)
+            if os.path.exists(ico_path):
+                # iconbitmap works on Windows
+                self.iconbitmap(ico_path)
+        except Exception:
+            # ignore if icon setting fails on other platforms
+            pass
+
+        # on-close confirm
+        self.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
         self.editing_id = None
 
@@ -373,6 +439,12 @@ class GTSApp(ctk.CTk):
         self._build_create_tab()
         self._build_view_tab()
         self.load_view_records()
+
+    # ... (rest of the class remains unchanged until the end) ...
+    # For brevity I kept the rest of the original GTSApp implementation intact.
+    # Below, the class methods are the same as before in your file, unchanged,
+    # except I added the _on_close_request method and the places where the code
+    # required minor integration (these are already included in the block below).
 
     # ---------- Create Tab ----------
     def _build_create_tab(self):
@@ -738,7 +810,6 @@ class GTSApp(ctk.CTk):
         except Exception:
             log_exc("_guarded_manage_places_dialog")
             messagebox.showerror("Error", "Failed to open Manage Areas/Places. See log.")
-
 
     def _reload_manage_places(self):
         """Refresh the Places list based on selected Area in Manage dialog."""
@@ -1390,12 +1461,24 @@ class GTSApp(ctk.CTk):
         except Exception:
             pass
 
+    def _on_close_request(self):
+        """Ask user for confirmation before quitting."""
+        try:
+            if messagebox.askyesno("Confirm", "Do you want to quit?"):
+                self.destroy()
+        except Exception:
+            # if messagebox fails for some reason, still destroy
+            try:
+                self.destroy()
+            except Exception:
+                pass
+
 # ---------------- startup login (License + PIN) ----------------
 def _startup_login_guard(max_attempts: int = 5) -> bool:
-    """Check license validity and prompt for Admin PIN before app launch."""
+    """Check license validity and prompt for Admin PIN with a branded login window."""
     try:
-        import tkinter as _tk
-        from tkinter import simpledialog as _simpledialog, messagebox as _messagebox
+        # use tkinter messagebox for alerts
+        from tkinter import messagebox as _messagebox
 
         cfg = _load_license()
         if not cfg:
@@ -1431,31 +1514,141 @@ def _startup_login_guard(max_attempts: int = 5) -> bool:
             except Exception:
                 pass
 
-        # PIN check
-        root = _tk.Tk()
-        root.withdraw()
-        tries = 0
-        while tries < max_attempts:
-            pin = _simpledialog.askstring(
-                "GTS Login",
-                f"Enter Admin PIN ({max_attempts-tries} tries left):",
-                show="*",
-                parent=root
-            )
-            if pin is None:
-                root.destroy()
-                return False
+        # Build a custom CTk login window (modal)
+        login = ctk.CTk()
+        login.title("GTS Login")
+        # set icon if exists
+        try:
+            ico_path = os.path.join(APP_DIR, ICON_ICO_NAME)
+            if os.path.exists(ico_path):
+                login.iconbitmap(ico_path)
+        except Exception:
+            pass
+
+        # geometry (centered)
+        w, h = 640, 340
+        try:
+            sw = login.winfo_screenwidth(); sh = login.winfo_screenheight()
+            x = max(0, (sw - w) // 2); y = max(0, (sh - h) // 2)
+            login.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            login.geometry(f"{w}x{h}")
+
+        login.resizable(False, False)
+
+        main_frame = ctk.CTkFrame(login)
+        main_frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        # Left: logo
+        left = ctk.CTkFrame(main_frame, width=260)
+        left.pack(side="left", fill="y", padx=(4,8), pady=4)
+        left.pack_propagate(False)
+
+        # Right: PIN entry
+        right = ctk.CTkFrame(main_frame)
+        right.pack(side="left", fill="both", expand=True, padx=(8,4), pady=4)
+
+        # load logo image if possible
+        logo_found = _find_logo_image()
+        logo_widget = None
+        if logo_found and Image is not None:
+            try:
+                img = Image.open(logo_found)
+                # make it fit nicely (square-ish)
+                max_size = 220
+                img.thumbnail((max_size, max_size), Image.ANTIALIAS)
+                ctk_logo = ctk.CTkImage(light_image=img, size=img.size)
+                logo_widget = ctk.CTkLabel(left, image=ctk_logo, text="")
+                logo_widget.image = ctk_logo
+                logo_widget.pack(expand=True)
+            except Exception:
+                logo_widget = None
+
+        if logo_widget is None:
+            ctk.CTkLabel(left, text="SECURITY &\nENFORCEMENT", font=roboto(16, "bold")).pack(expand=True)
+
+        # Right side content
+        ctk.CTkLabel(right, text="GTS — Admin Login", font=roboto(18, "bold")).pack(anchor="w", pady=(12,6), padx=6)
+        ctk.CTkLabel(right, text="Enter Admin PIN to continue", font=roboto(11)).pack(anchor="w", padx=6)
+
+        pin_var = tk.StringVar()
+        pin_entry = ctk.CTkEntry(right, textvariable=pin_var, show="*", width=220, font=roboto(14))
+        pin_entry.pack(pady=(14, 6), padx=6)
+        pin_entry.focus_set()
+
+        status_label = ctk.CTkLabel(right, text=f"{max_attempts} attempts remaining", font=roboto(10))
+        status_label.pack(anchor="w", padx=6, pady=(0,6))
+
+        btn_row = ctk.CTkFrame(right)
+        btn_row.pack(padx=6, pady=8)
+        result = {"ok": False, "tries": 0}
+
+        def _fail_try():
+            remaining = max_attempts - result["tries"]
+            status_label.configure(text=f"{remaining} attempts remaining")
+            if remaining <= 0:
+                _messagebox.showerror("Locked", "Too many failed attempts. Exiting.")
+                try:
+                    _fade_out_window(login, ms=200)
+                except Exception:
+                    pass
+                try:
+                    login.destroy()
+                except Exception:
+                    pass
+
+        def _on_cancel():
+            try:
+                login.destroy()
+            except Exception:
+                pass
+
+        def _on_submit(event=None):
+            pin = (pin_var.get() or "")
             expected = payload.get("admin_pin_hash")
             salt = payload.get("admin_pin_salt")
             if expected and salt and _hash_pin(pin, salt) == expected:
-                root.destroy()
-                return True
-            tries += 1
-            _messagebox.showerror("Incorrect PIN", "PIN is incorrect.")
-        root.destroy()
-        _messagebox.showerror("Locked", "Too many failed attempts. Exiting.")
-        return False
-        
+                result["ok"] = True
+                # success animation then destroy
+                try:
+                    _fade_out_window(login, ms=200)
+                except Exception:
+                    pass
+                try:
+                    login.destroy()
+                except Exception:
+                    pass
+            else:
+                result["tries"] += 1
+                _messagebox.showerror("Incorrect PIN", "PIN is incorrect.")
+                _fail_try()
+
+        ctk.CTkButton(btn_row, text="Login", command=_on_submit, width=100).pack(side="left", padx=(0,8))
+        ctk.CTkButton(btn_row, text="Cancel", command=_on_cancel, width=100).pack(side="left")
+
+        # allow Enter to submit
+        login.bind("<Return>", _on_submit)
+
+        # make modal
+        try:
+            login.grab_set()
+        except Exception:
+            pass
+
+        # fade-in
+        try:
+            _fade_in_window(login, ms=300)
+        except Exception:
+            pass
+
+        # run the modal window
+        try:
+            login.mainloop()
+        except Exception:
+            pass
+
+        return result["ok"]
+
     except Exception:
         log_exc("_startup_login_guard")
         return False
@@ -1466,6 +1659,15 @@ if __name__ == "__main__":
         if not _startup_login_guard(max_attempts=5):
             raise SystemExit(1)
         app = GTSApp()
+        # start invisible then fade-in
+        try:
+            app.attributes("-alpha", 0.0)
+        except Exception:
+            pass
+        try:
+            _fade_in_window(app, ms=400)
+        except Exception:
+            pass
         app.mainloop()
     except SystemExit:
         pass
