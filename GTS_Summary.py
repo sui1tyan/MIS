@@ -273,27 +273,44 @@ def load_json(s):
         return json.loads(s) if s else {}
     except Exception:
         return {}
+        
+def _resolve_store_path(p):
+    """Return absolute filesystem path for a stored image path.
+    If p is already absolute return it unchanged; else join with IMG_STORE.
+    Returns None for falsy p."""
+    if not p:
+        return None
+    return p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
 
 def copy_images_to_store(paths, label, dest_dir):
     os.makedirs(dest_dir, exist_ok=True)
     saved = []
     for idx, p in enumerate(paths or []):
         try:
-            if isinstance(p, str) and os.path.commonpath([os.path.abspath(p), os.path.abspath(dest_dir)]) == os.path.abspath(dest_dir):
-                saved.append(p)
-                continue
+            # canonical source path (handle relative stored paths that are relative to IMG_STORE)
+            src_candidate = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
+
+            # if source exists and is already under dest_dir, store relative path
+            if os.path.exists(src_candidate):
+                try_src_abs = os.path.abspath(src_candidate)
+                if os.path.commonpath([try_src_abs, os.path.abspath(dest_dir)]) == os.path.abspath(dest_dir):
+                    saved.append(os.path.relpath(try_src_abs, IMG_STORE))
+                    continue
         except Exception:
             pass
+
         try:
-            base_ext = os.path.splitext(p)[1] or ".jpg"
+            # copy from the best available source (prefers src_candidate if exists, else p)
+            src_to_copy = src_candidate if os.path.exists(src_candidate) else p
+            base_ext = os.path.splitext(src_to_copy)[1] or ".jpg"
             ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             fname = f"{label}_{idx}_{ts}{base_ext}"
             dest = os.path.join(dest_dir, fname)
-            shutil.copy2(p, dest)
+            shutil.copy2(src_to_copy, dest)
             saved.append(os.path.relpath(dest, IMG_STORE))
         except Exception:
             log_exc(f"copy image failed for {p}")
-    # de-dup
+    # de-dup while preserving order
     out, seen = [], set()
     for s in saved:
         if s not in seen:
@@ -695,13 +712,15 @@ class GTSApp(ctk.CTk):
         try:
             if not p:
                 return
-            ap = os.path.abspath(p)
+            rp = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
+            ap = os.path.abspath(rp)
             img_root = os.path.abspath(IMG_STORE)
             # only delete files inside the app's images folder
             if os.path.exists(ap) and os.path.commonpath([ap, img_root]) == img_root:
                 os.remove(ap)
         except Exception:
             log_exc(f"_delete_if_under_store failed for {p}")
+
     
     def _clear_create_form(self):
         self.editing_id = None
@@ -1089,10 +1108,20 @@ class GTSApp(ctk.CTk):
     def _cleanup_removed(self, prev_map, new_map):
         try:
             for k, prev_list in (prev_map or {}).items():
-                keep = set((new_map or {}).get(k, []))
+                # build set of absolute keep-paths
+                keep = set()
+                for np in (new_map or {}).get(k, []):
+                    if not np:
+                        continue
+                    rp = np if os.path.isabs(np) else os.path.join(IMG_STORE, np)
+                    keep.add(os.path.abspath(rp))
                 for p in prev_list or []:
-                    if p not in keep:
-                        self._delete_if_under_store(p)
+                    if not p:
+                        continue
+                    prev_abs = os.path.abspath(p if os.path.isabs(p) else os.path.join(IMG_STORE, p))
+                    if prev_abs not in keep:
+                        # delete by passing the absolute path to delete helper
+                        self._delete_if_under_store(prev_abs)
         except Exception:
             log_exc("_cleanup_removed")
 
@@ -1432,14 +1461,28 @@ class GTSApp(ctk.CTk):
             estate_data = load_json(estate_s); kilang_data = load_json(kilang_s)
     
             for k in REQUIRED_E:
-                paths = [p for p in (estate_data.get(k, []) or []) if isinstance(p, str) and os.path.exists(p)][:2]
-                self.estate_files[k]["paths"] = paths
-                self.estate_files[k]["count_widget"].configure(text=f"{len(paths)} files")
+                resolved = []
+                for p in (estate_data.get(k, []) or []):
+                    if not isinstance(p, str): 
+                        continue
+                    rp = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
+                    if os.path.exists(rp):
+                        resolved.append(rp)
+                resolved = resolved[:2]
+                self.estate_files[k]["paths"] = resolved
+                self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
 
             for k in REQUIRED_K:
-                paths = [p for p in (kilang_data.get(k, []) or []) if isinstance(p, str) and os.path.exists(p)][:2]
-                self.kilang_files[k]["paths"] = paths
-                self.kilang_files[k]["count_widget"].configure(text=f"{len(paths)} files")
+                resolved = []
+                for p in (kilang_data.get(k, []) or []):
+                    if not isinstance(p, str):
+                        continue
+                    rp = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
+                    if os.path.exists(rp):
+                        resolved.append(rp)
+                resolved = resolved[:2]
+                self.kilang_files[k]["paths"] = resolved
+                self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
 
             # show create tab and ensure top
             self._show_create_tab()
