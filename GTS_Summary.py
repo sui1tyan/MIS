@@ -1165,61 +1165,78 @@ class GTSApp(ctk.CTk):
             log_exc("_save_record")
             messagebox.showerror("Error", "Failed to save record. See log.")
 
-        def _cleanup_removed(self, prev_map, new_map):
-            """
-            Remove any files that were previously in prev_map but no longer exist in new_map.
-            Only deletes files under IMG_STORE.
-            """
-            try:
-                prev_map = prev_map or {}
-                new_map = new_map or {}
+    def _cleanup_removed(self, prev_map, new_map):
+        """
+        Remove any files that were previously in prev_map but no longer occur in new_map.
+        Only deletes files that are physically under IMG_STORE (very conservative).
+        """
+        try:
+            prev_map = prev_map or {}
+            new_map = new_map or {}
 
-                for key, prev_list in prev_map.items():
-                    # Build set of absolute paths that should be kept
-                    keep_set = set()
-                    for np in new_map.get(key, []):
-                        if not np or not isinstance(np, str):
-                            continue
-                        abs_np = self._resolve_path(np)
-                        keep_set.add(abs_np)
+            def _abs(p):
+                if not p or not isinstance(p, str):
+                    return None
+                try:
+                    # if already absolute use it, otherwise treat it as relative to IMG_STORE
+                    cand = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
+                    return os.path.normpath(os.path.abspath(cand))
+                except Exception:
+                    return None
 
-                    # Iterate previous paths and delete if not in keep_set
-                    for p in prev_list or []:
-                        if not p or not isinstance(p, str):
-                            continue
-                        abs_prev = self._resolve_path(p)
-                        if abs_prev not in keep_set:
-                            # Only delete if it is under IMG_STORE
-                            self._delete_if_under_store(abs_prev)
+            # Build keep set (absolute paths)
+            keep = set()
+            for lst in new_map.values():
+                for np in (lst or []):
+                    ap = _abs(np)
+                    if ap:
+                        keep.add(ap)
 
-            except Exception:
-                log_exc("_cleanup_removed")
+            img_root = os.path.abspath(IMG_STORE)
+            for key, prev_list in prev_map.items():
+                for p in (prev_list or []):
+                    ap = _abs(p)
+                    if not ap:
+                        continue
+                    # only delete if not in keep and actually under the IMG_STORE root
+                    try:
+                        if ap not in keep and os.path.commonpath([ap, img_root]) == img_root:
+                            if os.path.exists(ap):
+                                try:
+                                    os.remove(ap)
+                                except Exception:
+                                    log_exc(f"remove failed: {ap}")
+                    except Exception:
+                        # commonpath can raise on different drive letters; skip deletion in that case
+                        log_exc(f"_cleanup_removed commonpath check failed for {ap}")
+        except Exception:
+            log_exc("_cleanup_removed")
 
     # ---------- Create reset lower section ----------
     def _reset_lower_section(self):
         """Clear estate/kilang attachments, marks, and remarks, and remove files safely."""
         try:
-            # Helper to normalize paths before deletion
-            def norm(p):
-                if not p:
-                    return None
-                return os.path.normpath(os.path.abspath(p if os.path.isabs(p) else os.path.join(IMG_STORE, p)))
-
             # Reset estate files
             for k, data in self.estate_files.items():
                 for p in list(data.get("paths", [])):
-                    abs_p = self._resolve_path(p)
-                    if abs_p and os.path.exists(abs_p):
-                        self._delete_if_under_store(abs_p)
+                    ap = self._resolve_path(p) if hasattr(self, "_resolve_path") else (p if os.path.isabs(p) else os.path.join(IMG_STORE, p))
+                    if ap and os.path.exists(ap):
+                        try:
+                            self._delete_if_under_store(ap)
+                        except Exception:
+                            log_exc(f"_reset_lower_section: failed delete {ap}")
                 data["paths"] = []
                 data["count_widget"].configure(text="0 files")
 
             # Reset kilang files
             for k, data in self.kilang_files.items():
                 for p in list(data.get("paths", [])):
-                    abs_p = self._resolve_path(p)
-                    if abs_p and os.path.exists(abs_p):
-                        self._delete_if_under_store(abs_p)
+                    ap = self._resolve_path(p) if hasattr(self, "_resolve_path") else (p if os.path.isabs(p) else os.path.join(IMG_STORE, p))
+                    if ap and os.path.exists(ap):
+                        try:
+                            self._delete_if_under_store(ap)
+                        except Exception:
+                            log_exc(f"_reset_lower_section: failed delete {ap}")
                 data["paths"] = []
                 data["count_widget"].configure(text="0 files")
 
@@ -1409,69 +1426,79 @@ class GTSApp(ctk.CTk):
             messagebox.showerror("Error", "Failed to open record for editing.")
 
     def _on_tree_select(self, event):
-        """Display selected record's details in the detail panel safely."""
+        sel = self.tree.selection()
+        if not sel:
+            return
         try:
-            sel = self.tree.selection()
-            if not sel:
-                return
-            try:
-                rid = int(sel[0])
-            except Exception:
-                return
-
-            # Fetch record from DB
+            rid = int(sel[0])
+        except Exception:
+            return
+        try:
             with db_cursor() as cur:
                 cur.execute("""
                     SELECT date, trip_no, area_id, place_id, apdn_no, e12_seal, k3_seal, car_plate,
                            estate_pics, kilang_pics, estate_marks, kilang_marks, remarks, status, created_at, updated_at
                     FROM gts_records WHERE id = ?
                 """, (rid,))
-                r = cur.fetchone()
-            if not r:
+                row = cur.fetchone()
+
+            if not row:
                 return
 
             (date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
              estate_s, kilang_s, e_marks_s, k_marks_s,
-             remarks, status, created, updated) = r
+             remarks, status, created, updated) = row
 
-            # Get area and place names
             with db_cursor() as cur:
                 cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
                 area_name = (cur.fetchone() or ["-"])[0]
                 cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
                 place_code = (cur.fetchone() or ["-"])[0]
 
-            # Safe path resolver
-            def safe_resolve(p):
-                try:
-                    if not p or not isinstance(p, str):
-                        return None
-                    abs_p = self._resolve_path(p)
-                    return abs_p if abs_p and os.path.exists(abs_p) else None
-                except Exception:
+            def resolve_existing(p):
+                if not p or not isinstance(p, str):
                     return None
+                # use instance resolver when available
+                try:
+                    ap = self._resolve_path(p) if hasattr(self, "_resolve_path") else (p if os.path.isabs(p) else os.path.join(IMG_STORE, p))
+                except Exception:
+                    ap = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
+                if ap and os.path.exists(ap):
+                    return ap
+                return None
 
-            # Load estate files
-            estate_data = load_json(estate_s)
+            estate_data_raw = load_json(estate_s) or {}
+            kilang_data_raw = load_json(kilang_s) or {}
+
+            # populate UI counters and internal storage with ABSOLUTE paths (if exists)
+            estate_counts = {}
             for k in REQUIRED_E:
-                resolved = [safe_resolve(p) for p in (estate_data.get(k, []) or [])]
-                resolved = [p for p in resolved if p][:2]  # max 2 files
+                resolved = []
+                for p in (estate_data_raw.get(k, []) or []):
+                    ap = resolve_existing(p)
+                    if ap:
+                        resolved.append(ap)
+                resolved = resolved[:2]
                 self.estate_files[k]["paths"] = resolved
                 self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+                estate_counts[k] = len(resolved)
 
-            # Load kilang files
-            kilang_data = load_json(kilang_s)
+            kilang_counts = {}
             for k in REQUIRED_K:
-                resolved = [safe_resolve(p) for p in (kilang_data.get(k, []) or [])]
-                resolved = [p for p in resolved if p][:2]
+                resolved = []
+                for p in (kilang_data_raw.get(k, []) or []):
+                    ap = resolve_existing(p)
+                    if ap:
+                        resolved.append(ap)
+                resolved = resolved[:2]
                 self.kilang_files[k]["paths"] = resolved
                 self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+                kilang_counts[k] = len(resolved)
 
-            # Load marks
             e_marks = load_json(e_marks_s)
             k_marks = load_json(k_marks_s)
-
-            # Build detail text
+  
+            # build details text
             lines = [
                 f"Date: {date_s}",
                 f"Trip: {trip or '-'}",
@@ -1481,24 +1508,20 @@ class GTSApp(ctk.CTk):
                 f"Seal E12: {seal_e12 or '-'}    Seal K3: {seal_k3 or '-'}",
                 f"Status: {status}",
                 f"Saved: {created}   Updated: {updated or '-'}",
-                "",
-                "Estate:"
+                ""
             ]
+            lines.append("Estate:")
             for k in REQUIRED_E:
-                lines.append(f"  {k}: {MARK_SYMBOL.get(e_marks.get(k, ''), '')} ({len(self.estate_files[k]['paths'])} files)")
+                lines.append(f"  {k}: {MARK_SYMBOL.get(e_marks.get(k, ''), '')} ({estate_counts.get(k, 0)} files)")
             lines.append("")
             lines.append("Kilang:")
             for k in REQUIRED_K:
-                lines.append(f"  {k}: {MARK_SYMBOL.get(k_marks.get(k, ''), '')} ({len(self.kilang_files[k]['paths'])} files)")
+                lines.append(f"  {k}: {MARK_SYMBOL.get(k_marks.get(k, ''), '')} ({kilang_counts.get(k, 0)} files)")
             lines.append("")
-            lines.append("Remarks:")
-            lines.append(remarks or "-")
+            lines.append("Remarks:"); lines.append(remarks or "-")
 
-            # Update detail text
             self.detail_text.delete("0.0", "end")
             self.detail_text.insert("0.0", "\n".join(lines))
-
-            # Scroll to top
             try:
                 self.detail_text.yview_moveto(0.0)
             except Exception:
@@ -1519,7 +1542,6 @@ class GTSApp(ctk.CTk):
         self._open_for_edit(rid)
 
     def _open_for_edit(self, rid):
-        """Open selected record for editing safely."""
         try:
             with db_cursor() as cur:
                 cur.execute("""
@@ -1532,90 +1554,93 @@ class GTSApp(ctk.CTk):
                 messagebox.showerror("Not found", "Record not found.")
                 return
 
-        (_id, date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
-         estate_s, kilang_s, e_marks_s, k_marks_s, remarks) = row
+            (_id, date_s, trip, aid, pid, apdn, seal_e12, seal_k3, car_plate,
+             estate_s, kilang_s, e_marks_s, k_marks_s, remarks) = row
 
-        self.editing_id = rid
-        self.cr_date.set(date_s or datetime.date.today().isoformat())
-        self.cr_apdn_e2.set(apdn or "")
-        self.cr_seal_e12.set(seal_e12 or "")
-        self.cr_seal_k3.set(seal_k3 or "")
+            self.editing_id = rid
+            self.cr_date.set(date_s or datetime.date.today().isoformat())
+            self.cr_apdn_e2.set(apdn or "")
+            self.cr_seal_e12.set(seal_e12 or "")
+            self.cr_seal_k3.set(seal_k3 or "")
 
-        # Parse trip number and car plate safely
-        if trip:
-            parts = trip.split("/")
-            if len(parts) == 3:
-                _, trip_num, car_plate_str = parts
-                self.cr_trip.set(trip_num)
-                self.cr_car_plate.set(car_plate_str)
-            elif len(parts) == 2:
-                _, trip_num = parts
-                self.cr_trip.set(trip_num)
-                self.cr_car_plate.set(car_plate or "")
+            # trip parsing
+            if trip:
+                parts = trip.split("/")
+                if len(parts) == 3:
+                    _, trip_num, car_plate_str = parts
+                    self.cr_trip.set(trip_num)
+                    self.cr_car_plate.set(car_plate_str)
+                elif len(parts) == 2:
+                    _, trip_num = parts
+                    self.cr_trip.set(trip_num)
+                    self.cr_car_plate.set(car_plate or "")
+                else:
+                    self.cr_trip.set(trip)
+                    self.cr_car_plate.set(car_plate or "")
             else:
-                self.cr_trip.set(trip)
+                self.cr_trip.set("")
                 self.cr_car_plate.set(car_plate or "")
-        else:
-            self.cr_trip.set("")
-            self.cr_car_plate.set(car_plate or "")
 
-        # Load area and place safely
-        with db_cursor() as cur:
-            cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
-            area_name = (cur.fetchone() or [""])[0]
+            # load area/place
+            with db_cursor() as cur:
+                cur.execute("SELECT name FROM areas WHERE id = ?", (aid,))
+                area_name = (cur.fetchone() or [""])[0]
             self.cr_area_box.configure(values=self._load_area_names())
             self.cr_area_var.set(area_name)
             self.cr_area_box.set(area_name)
-
             self._reload_places_box()
-            cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
-            pc = (cur.fetchone() or [""])[0]
-        self.cr_place_var.set(pc)
-        self.cr_place_box.set(pc)
+            with db_cursor() as cur:
+                cur.execute("SELECT code FROM places WHERE id = ?", (pid,))
+                pc = (cur.fetchone() or [""])[0]
+            self.cr_place_var.set(pc)
+            self.cr_place_box.set(pc)
 
-        # Remarks
-        self.cr_remarks.delete("0.0", "end")
-        self.cr_remarks.insert("0.0", remarks or "")
+            self.cr_remarks.delete("0.0", "end")
+            self.cr_remarks.insert("0.0", remarks or "")
 
-        # Load marks
-        e_marks = load_json(e_marks_s)
-        k_marks = load_json(k_marks_s)
-        for k in REQUIRED_E: self.estate_marks[k].set(e_marks.get(k, ""))
-        for k in REQUIRED_K: self.kilang_marks[k].set(k_marks.get(k, ""))
+            e_marks = load_json(e_marks_s); k_marks = load_json(k_marks_s)
+            for k in REQUIRED_E: self.estate_marks[k].set(e_marks.get(k, ""))
+            for k in REQUIRED_K: self.kilang_marks[k].set(k_marks.get(k, ""))
 
-        # Load estate files safely
-        estate_data = load_json(estate_s)
-        for k in REQUIRED_E:
-            resolved = []
-            for p in estate_data.get(k, []) or []:
-                if not isinstance(p, str):
-                    continue
-                abs_p = self._resolve_path(p)
-                if abs_p and os.path.exists(abs_p):
-                    resolved.append(abs_p)
-            self.estate_files[k]["paths"] = resolved[:2]  # max 2
-            self.estate_files[k]["count_widget"].configure(text=f"{len(resolved[:2])} files")
+            estate_data = load_json(estate_s) or {}
+            kilang_data = load_json(kilang_s) or {}
 
-        # Load kilang files safely
-        kilang_data = load_json(kilang_s)
-        for k in REQUIRED_K:
-            resolved = []
-            for p in kilang_data.get(k, []) or []:
-                if not isinstance(p, str):
-                    continue
-                abs_p = self._resolve_path(p)
-                if abs_p and os.path.exists(abs_p):
-                    resolved.append(abs_p)
-            self.kilang_files[k]["paths"] = resolved[:2]
-            self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved[:2])} files")
+            def resolve_existing(p):
+                if not p or not isinstance(p, str):
+                    return None
+                try:
+                    ap = self._resolve_path(p) if hasattr(self, "_resolve_path") else (p if os.path.isabs(p) else os.path.join(IMG_STORE, p))
+                except Exception:
+                    ap = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
+                return ap if ap and os.path.exists(ap) else None
 
-        # Show create tab
-        self._show_create_tab()
-        self._update_save_warning()
+            for k in REQUIRED_E:
+                resolved = []
+                for p in (estate_data.get(k, []) or []):
+                    rp = resolve_existing(p)
+                    if rp:
+                        resolved.append(rp)
+                resolved = resolved[:2]
+                self.estate_files[k]["paths"] = resolved
+                self.estate_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
 
-    except Exception:
-        log_exc("_open_for_edit")
-        messagebox.showerror("Error", "Failed to open record for edit. See log.")
+            for k in REQUIRED_K:
+                resolved = []
+                for p in (kilang_data.get(k, []) or []):
+                    rp = resolve_existing(p)
+                    if rp:
+                        resolved.append(rp)
+                resolved = resolved[:2]
+                self.kilang_files[k]["paths"] = resolved
+                self.kilang_files[k]["count_widget"].configure(text=f"{len(resolved)} files")
+
+            # show create tab and ensure top
+            self._show_create_tab()
+            self._update_save_warning()
+
+        except Exception:
+            log_exc("_open_for_edit")
+            messagebox.showerror("Error", "Failed to open record for edit. See log.")
 
     def _delete_selected(self):
         sel = self.tree.selection()
@@ -1678,35 +1703,32 @@ class GTSApp(ctk.CTk):
 
     # ---------- tab navigation helpers ----------
     def _show_create_tab(self):
-        """Switch to Create tab and safely normalize paths."""
         try:
             self.tabview.set("Create Record")
-
-            # Scroll to top-left
             try:
                 self.create_ds.canvas.xview_moveto(0)
                 self.create_ds.canvas.yview_moveto(0)
             except Exception:
                 pass
 
-            # Helper: normalize paths safely
             def normalize_paths(files_dict):
                 for k, data in files_dict.items():
-                    paths = data.get("paths", [])
+                    paths = data.get("paths", []) or []
                     normalized = []
                     for p in paths:
                         if not p or not isinstance(p, str):
                             continue
-                        abs_p = self._resolve_path(p)
+                        try:
+                            abs_p = self._resolve_path(p) if hasattr(self, "_resolve_path") else (p if os.path.isabs(p) else os.path.join(IMG_STORE, p))
+                        except Exception:
+                            abs_p = p if os.path.isabs(p) else os.path.join(IMG_STORE, p)
                         if abs_p and os.path.exists(abs_p):
                             normalized.append(abs_p)
-                    data["paths"] = normalized[:2]  # keep max 2
-                    data["count_widget"].configure(text=f"{len(normalized[:2])} files")
+                    data["paths"] = normalized
+                    data["count_widget"].configure(text=f"{len(normalized)} files")
 
             normalize_paths(self.estate_files)
             normalize_paths(self.kilang_files)
-
-            # Update save warning
             self._update_save_warning()
 
         except Exception:
