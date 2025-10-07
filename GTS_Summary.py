@@ -14,19 +14,63 @@ from tkinter import font as tkfont
 from contextlib import contextmanager
 
 # ---------- Helper: Resolve file paths ----------
-def _resolve_path(self, p):
+def _resolve_path(p):
     """
-    Convert a path to absolute path.
-    - If p is already absolute, return normalized absolute path.
-    - If p is relative, assume relative to IMG_STORE.
-    - Returns None for invalid input.
+    Resolve a stored path to normalized absolute path.
+
+    Behavior:
+      - If p is absolute and exists -> return normalized absolute path.
+      - If p is absolute but does not exist -> try fallback lookups inside IMG_STORE
+        (same filename or first occurrence under IMG_STORE).
+      - If p is relative -> treat it as relative to IMG_STORE and return absolute
+        path if found; otherwise perform same filename fallback search.
+      - Returns None if nothing can be found.
+
+    The fallback search (os.walk) is only used when the direct path doesn't exist,
+    and it returns the first match found under IMG_STORE (useful when the images
+    tree was copied to a new location).
     """
-    if not p or not isinstance(p, str):
+    try:
+        if not p or not isinstance(p, str):
+            return None
+        p = p.strip()
+        # absolute path case
+        if os.path.isabs(p):
+            ap = os.path.normpath(os.path.abspath(p))
+            if os.path.exists(ap):
+                return ap
+            # fallback: try same filename directly under IMG_STORE
+            base = os.path.basename(ap)
+            candidate = os.path.join(IMG_STORE, base)
+            if os.path.exists(candidate):
+                return os.path.normpath(os.path.abspath(candidate))
+            # fallback: search for filename under IMG_STORE
+            try:
+                for root, _, files in os.walk(IMG_STORE):
+                    if base in files:
+                        return os.path.normpath(os.path.abspath(os.path.join(root, base)))
+            except Exception:
+                pass
+            return None
+
+        # relative path -> resolve relative to IMG_STORE
+        ap = os.path.normpath(os.path.abspath(os.path.join(IMG_STORE, p)))
+        if os.path.exists(ap):
+            return ap
+        base = os.path.basename(p)
+        candidate = os.path.join(IMG_STORE, base)
+        if os.path.exists(candidate):
+            return os.path.normpath(os.path.abspath(candidate))
+        try:
+            for root, _, files in os.walk(IMG_STORE):
+                if base in files:
+                    return os.path.normpath(os.path.abspath(os.path.join(root, base)))
+        except Exception:
+            pass
         return None
-    # ensure IMG_STORE is absolute
-    store = IMG_STORE if os.path.isabs(IMG_STORE) else os.path.abspath(IMG_STORE)
-    abs_p = p if os.path.isabs(p) else os.path.join(store, p)
-    return os.path.normpath(os.path.abspath(abs_p))
+    except Exception:
+        # be conservative on unexpected errors
+        return None
 
 # ---------------- cleanup stale _MEI folders ----------------
 try:
@@ -502,6 +546,7 @@ class GTSApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
         self.editing_id = None
+        self._resolve_path = _resolve_path
 
         self.f_base = roboto(12)
         self.f_bold = roboto(12, "bold")
